@@ -7,6 +7,7 @@ import chokidar, { type FSWatcher } from 'chokidar'
 import type { Conflict, Kind, Note, SearchHit, SearchQuery } from '../shared/types'
 import { validDate } from '../shared/calendar'
 import { normalizeLines, stableValue } from '../shared/conflicts'
+import { referencedImages } from './export-images'
 
 export const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 export function atomic(file: string, value: string | Buffer) {
@@ -341,19 +342,23 @@ export class Library {
   export(id: string, destination: string) {
     const note = this.get(id)
     const target = path.join(destination, `XMemeory-${id}-${Date.now()}`)
-    mkdirSync(target, { recursive: true })
-    // Export library-relative structure, including linked documents, so links remain portable.
-    const seen = new Set<string>()
-    const visit = (n: Note) => {
-      if (seen.has(n.id)) return; seen.add(n.id)
-      const out = path.join(target, n.path); mkdirSync(path.dirname(out), { recursive: true }); copyFileSync(safePath(this.root, n.path), out)
-      for (const m of n.body.matchAll(/!?\[\[([^\]|#]+)(?:[^\]]*)\]\]/g)) {
-        const linked = [...this.notes.values()].find(x => x.title === m[1] || x.path.replace(/\.md$/, '') === m[1])
-        if (linked) visit(linked)
-      }
+    const original = safePath(this.root, note.path)
+    const files = new Set([note.path])
+    for (const reference of referencedImages(decode(readFileSync(original, 'utf8')).body)) {
+      let relative: string
+      try { relative = decodeURIComponent(reference) } catch { throw new Error('图片路径编码无效，未导出') }
+      if (!/\.(png|jpe?g|gif|webp)$/i.test(relative)) continue
+      relative = relative.startsWith('assets/') ? relative : path.join(path.dirname(note.path), relative)
+      const image = safePath(this.root, relative)
+      if (!existsSync(image) || !lstatSync(image).isFile()) throw new Error(`引用图片缺失：${reference}`)
+      files.add(path.relative(this.root, image))
     }
-    visit(note)
-    for (const file of walk(this.root, 'assets')) { const out = path.join(target, file); mkdirSync(path.dirname(out), { recursive: true }); copyFileSync(safePath(this.root, file), out) }
+    mkdirSync(target, { recursive: true })
+    for (const file of files) {
+      const out = safePath(target, file)
+      mkdirSync(path.dirname(out), { recursive: true })
+      copyFileSync(safePath(this.root, file), out)
+    }
     return target
   }
 }

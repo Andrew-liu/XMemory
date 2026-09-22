@@ -8,14 +8,17 @@ import FileHandler from '@tiptap/extension-file-handler'
 import { Bold, Italic, List, Quote, Code, Table2, Link2, ImagePlus, FileCode2, Eye, ArrowDownToLine } from 'lucide-react'
 import type { Note } from '../shared/types'
 import { Wiki, resolveLink } from './wiki'
+import { findSearchMatch } from '../shared/search-location'
 import { prepareMarkdown } from './markdown'
 import { TypedMarkdownLink, linkAddress } from './links'
 
 export interface EditorHandle { flush(): Promise<void>; recover(): Promise<void> }
-export const NoteEditor = forwardRef<EditorHandle, { note: Note; notes: Note[]; open: (id: string) => void; error: (s: string) => void; saved: (note: Note) => void }>(function NoteEditor({ note, notes, open, error, saved }, ref) {
+export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: string; request: number }; note: Note; notes: Note[]; open: (id: string) => void; error: (s: string) => void; saved: (note: Note) => void }>(function NoteEditor({ searchLocation, note, notes, open, error, saved }, ref) {
   const [title, setTitle] = useState(note.title)
   const [body, setBody] = useState(note.body)
   const [source, setSource] = useState(false)
+  const sourceInput = useRef<HTMLTextAreaElement>(null)
+  const [locationMessage, setLocationMessage] = useState('')
   const [status, setStatus] = useState('已保存到本地')
   const [linkPicker, setLinkPicker] = useState(false)
   const [linkTerm, setLinkTerm] = useState('')
@@ -156,6 +159,44 @@ export const NoteEditor = forwardRef<EditorHandle, { note: Note; notes: Note[]; 
   useEffect(() => {
     if (note.hash !== data.current.note.hash && !data.current.dirty) { data.current.note = note; data.current.body = note.body; data.current.title = note.title; setBody(note.body); setTitle(note.title); editor?.commands.setContent(prepareMarkdown(note.body), { contentType: 'markdown', emitUpdate: false }); setStatus('已读取外部更新') }
   }, [note.hash])
+  useEffect(() => {
+    if (!searchLocation?.query.trim() || !editor) { setLocationMessage(''); return }
+    const frame = requestAnimationFrame(() => {
+      const root = editor.view.dom
+      if (!source) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+        const nodes: Text[] = []; let text = ''
+        while (walker.nextNode()) { const node = walker.currentNode as Text; nodes.push(node); text += node.data }
+        const match = findSearchMatch(text, searchLocation.query)
+        if (match) {
+          const range = document.createRange(); let offset = 0, started = false
+          for (const node of nodes) {
+            if (!started && match.from < offset + node.length) { range.setStart(node, match.from - offset); started = true }
+            if (started && match.to <= offset + node.length) { range.setEnd(node, match.to - offset); break }
+            offset += node.length
+          }
+          root.focus({ preventScroll: true })
+          const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range)
+          range.startContainer.parentElement?.scrollIntoView({ block: 'center' })
+          setLocationMessage('已定位正文匹配位置'); return
+        }
+      }
+      const match = findSearchMatch(data.current.body, searchLocation.query)
+      if (match) {
+        if (!source) { setSource(true); return }
+        const input = sourceInput.current
+        if (input) {
+          input.focus(); input.setSelectionRange(match.from, match.to)
+          const style = getComputedStyle(input)
+          const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5
+          input.scrollTop = Math.max(0, data.current.body.slice(0, match.from).split('\n').length * lineHeight - input.clientHeight / 2)
+          input.scrollIntoView({ block: 'center' })
+        }
+        setLocationMessage('已定位 Markdown 源码匹配位置')
+      } else setLocationMessage('正文无匹配；关键词可能位于标题或附加信息，或内容已变化')
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [searchLocation, editor, source])
   const command = (fn: () => void) => { if (source) { editor?.commands.setContent(prepareMarkdown(body), { contentType: 'markdown', emitUpdate: false }); setSource(false) }; fn(); editor?.commands.focus() }
   const toggle = () => { if (source) editor?.commands.setContent(prepareMarkdown(body), { contentType: 'markdown', emitUpdate: false }); setSource(!source) }
   return <section className="document">
@@ -169,6 +210,7 @@ export const NoteEditor = forwardRef<EditorHandle, { note: Note; notes: Note[]; 
     <header className="document-top"><span className="eyebrow">{note.kind === 'memory' ? '记忆档案' : note.kind === 'draft' ? '候选稿' : note.kind === 'topic' ? '长文选题' : '灵感笔记'}</span><span className="save-status"><i />{status}</span><button title="导出 Markdown 和图片" onClick={() => { void flush().then(() => window.xm.exportNote(note.id)).catch(e => error(e.message)) }}><ArrowDownToLine size={16}/></button></header>
     <input className="document-title" aria-label="标题" placeholder={note.kind === 'topic' ? '给长文起个标题' : '给灵感起个名字'} value={title} onChange={e => { setTitle(e.target.value); data.current.title = e.target.value; data.current.dirty = true; window.xm.editorDirty(true) }} />
     <div className="doc-meta">{note.kind === 'draft' && <span>{note.generationProvider ? `${note.generationProvider.name} · ${note.generationProvider.model}` : '生成模型未记录'}</span>}<span>{new Date(note.kind === 'memory' ? note.publishedAt || note.createdAt : note.createdAt).toLocaleDateString('zh-CN')}</span><span>{note.tags.join(' · ') || '私人资料库'}</span>{note.source && <button onClick={() => void window.xm.external(note.source!)}>查看原文 ↗</button>}{note.webSources?.map(source => <button key={source.url} title={source.title} onClick={() => void window.xm.external(source.url).catch(e => error(e.message))}>来源 · {source.source} ↗</button>)}</div>
+    {locationMessage && <p role="status" className="search-location-status">{locationMessage}</p>}
     <div className="toolbar">
       <button title="加粗" onClick={() => command(() => editor?.chain().toggleBold().run())}><Bold size={16}/></button>
       <button title="斜体" onClick={() => command(() => editor?.chain().toggleItalic().run())}><Italic size={16}/></button>
@@ -190,7 +232,7 @@ export const NoteEditor = forwardRef<EditorHandle, { note: Note; notes: Note[]; 
     </div>
     {linkForm && <form className="link-form" onSubmit={e=>{e.preventDefault();try { const href=linkAddress(linkURL); command(()=>editor?.chain().focus().insertContent({type:'text',text:linkText.trim() || href,marks:[{type:'link',attrs:{href}}]}).run());setLinkForm(false);setLinkText('');setLinkURL('') } catch(e) {setLinkError((e as Error).message)} }}><input aria-label="链接文字" placeholder="链接文字" value={linkText} onChange={e=>setLinkText(e.target.value)}/><input aria-label="链接地址" placeholder="https://… 或笔记.md" value={linkURL} onChange={e=>setLinkURL(e.target.value)}/><button type="submit">插入</button><button type="button" onClick={()=>setLinkForm(false)}>取消</button>{linkError && <p role="alert">{linkError}</p>}</form>}
     {linkPicker && <div className="link-picker"><input autoFocus value={linkTerm} onChange={e => setLinkTerm(e.target.value)} placeholder="搜索要链接的笔记"/>{notes.filter(n => !n.deleted && n.title.includes(linkTerm)).slice(0, 8).map(n => <div key={n.id}><span>{n.title}</span><button onClick={() => { editor?.commands.insertContent({ type: 'wiki', attrs: { target: n.path.replace(/\.md$/, ''), label: n.title, embed: false } }); setLinkPicker(false) }}>双链</button><button onClick={() => { editor?.commands.insertContent({ type: 'wiki', attrs: { target: n.path.replace(/\.md$/, ''), label: n.title, embed: true } }); setLinkPicker(false) }}>嵌入</button></div>)}</div>}
-    {source ? <textarea className="source-editor" aria-label="Markdown 源码" value={body} onChange={e => update(e.target.value)} spellCheck={false}/> : <EditorContent editor={editor}/>}
+    {source ? <textarea ref={sourceInput} className="source-editor" aria-label="Markdown 源码" value={body} onChange={e => update(e.target.value)} spellCheck={false}/> : <EditorContent editor={editor}/>}
     <footer className="document-footer"><span>{body.length} 字符 · Markdown</span><span>{note.path}</span></footer>
     <div className="backlinks"><span className="eyebrow">反向链接</span>{notes.filter(n => n.id !== note.id && (n.body.includes(`[[${note.title}`) || n.body.includes(`[[${note.path.replace(/\.md$/, '')}`))).map(n => <button key={n.id} onClick={() => open(n.id)}>↗ {n.title}</button>)}</div>
   </section>

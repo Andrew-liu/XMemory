@@ -1,6 +1,6 @@
 <h1 align="center">XMemeory</h1>
 <p align="center">
-  <img alt="版本 0.4.0" src="https://img.shields.io/badge/version-0.4.0-5265b5">
+  <img alt="版本 0.4.1" src="https://img.shields.io/badge/version-0.4.1-5265b5">
   <img alt="开发中" src="https://img.shields.io/badge/status-in%20development-blue">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
@@ -38,7 +38,7 @@ XMemeory 是一款本地优先的桌面写作 App，将短推灵感、参考资�
 - 自动保存，支持在外部编辑 Markdown 后回读。
 - 直接粘贴图片到正文，图片保存在本地。
 - 双击放大图片、查看原始尺寸、右键复制；另提供邮件富文本复制。
-- 支持导出 Markdown 和图片。
+- 导出当前笔记的 Markdown 和正文直接引用的本地图片，不携带其他笔记或无关附件。
 
 ## AI 创作
 
@@ -54,7 +54,7 @@ XMemeory 是一款本地优先的桌面写作 App，将短推灵感、参考资�
 
 - 搜索已保存的灵感、记忆、选题和候选稿。
 - 支持类型、作者、标签和日期筛选。
-- 高亮标题与摘要中的命中内容，点击即可打开原文。
+- 高亮标题与摘要中的命中内容，点击结果滚动并选中正文匹配位置；源码中的匹配可切换源码定位。
 
 ## 私有同步与数据管理
 
