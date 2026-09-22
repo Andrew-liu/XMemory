@@ -29,6 +29,8 @@ try {
   const source = page.getByRole('textbox', { name: 'Markdown 源码' })
   await expect(source).toBeVisible()
   expect(await source.evaluate((el: HTMLTextAreaElement) => el.value.slice(el.selectionStart, el.selectionEnd))).toBe('hidden-target')
+  await page.getByRole('button', { name: '切换 Markdown 源码' }).click()
+  await expect(source).toBeHidden()
   await search.fill('标题专有词')
   await page.locator('.note-card').filter({ hasText: '标题专有词' }).click()
   await expect(page.getByRole('status')).toContainText('正文无匹配')

@@ -19,6 +19,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
   const [source, setSource] = useState(false)
   const sourceInput = useRef<HTMLTextAreaElement>(null)
   const [locationMessage, setLocationMessage] = useState('')
+  const locatedRequest = useRef<typeof searchLocation>(undefined)
   const [status, setStatus] = useState('已保存到本地')
   const [linkPicker, setLinkPicker] = useState(false)
   const [linkTerm, setLinkTerm] = useState('')
@@ -77,9 +78,23 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
   useEffect(() => { window.xm.editorDirty(false); return () => window.xm.editorDirty(false) }, [note.id])
   const update = (value: string) => { if (value === data.current.body) return; data.current.body = value; data.current.dirty = true; window.xm.editorDirty(true); setBody(value); setStatus('等待保存…') }
   const importFiles = async (files: File[]) => {
+    const images: { relative: string; name: string }[] = []
     for (const file of files) {
       const relative = await window.xm.image([...new Uint8Array(await file.arrayBuffer())], file.name)
-      editor?.chain().focus().setImage({ src: '../' + relative, alt: file.name }).run()
+      images.push({ relative, name: file.name })
+    }
+    if (!editor || editor.isDestroyed) return
+    const input = sourceInput.current
+    if (input) {
+      const start = input.selectionStart, end = input.selectionEnd
+      const markdown = images.map(image => `![${image.name.replace(/[\\[\]]/g, '\\$&')}](../${image.relative})`).join('\n\n')
+      const text = data.current.body
+      update(text.slice(0, start) + markdown + text.slice(end))
+      requestAnimationFrame(() => {
+        if (sourceInput.current === input) { input.focus(); input.setSelectionRange(start + markdown.length, start + markdown.length) }
+      })
+    } else {
+      for (const image of images) editor.chain().focus().setImage({ src: '../' + image.relative, alt: image.name }).run()
     }
   }
   const LocalImage = Image.extend({
@@ -161,6 +176,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
   }, [note.hash])
   useEffect(() => {
     if (!searchLocation?.query.trim() || !editor) { setLocationMessage(''); return }
+    if (locatedRequest.current === searchLocation) return
     const frame = requestAnimationFrame(() => {
       const root = editor.view.dom
       if (!source) {
@@ -178,6 +194,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
           root.focus({ preventScroll: true })
           const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range)
           range.startContainer.parentElement?.scrollIntoView({ block: 'center' })
+          locatedRequest.current = searchLocation
           setLocationMessage('已定位正文匹配位置'); return
         }
       }
@@ -192,8 +209,9 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
           input.scrollTop = Math.max(0, data.current.body.slice(0, match.from).split('\n').length * lineHeight - input.clientHeight / 2)
           input.scrollIntoView({ block: 'center' })
         }
+        locatedRequest.current = searchLocation
         setLocationMessage('已定位 Markdown 源码匹配位置')
-      } else setLocationMessage('正文无匹配；关键词可能位于标题或附加信息，或内容已变化')
+      } else { locatedRequest.current = searchLocation; setLocationMessage('正文无匹配；关键词可能位于标题或附加信息，或内容已变化') }
     })
     return () => cancelAnimationFrame(frame)
   }, [searchLocation, editor, source])

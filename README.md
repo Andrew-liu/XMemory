@@ -1,6 +1,6 @@
 <h1 align="center">XMemeory</h1>
 <p align="center">
-  <img alt="版本 0.4.1" src="https://img.shields.io/badge/version-0.4.1-5265b5">
+  <img alt="版本 0.4.2" src="https://img.shields.io/badge/version-0.4.2-5265b5">
   <img alt="开发中" src="https://img.shields.io/badge/status-in%20development-blue">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
