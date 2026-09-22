@@ -1,0 +1,88 @@
+{
+  "name": "xmemeory",
+  "version": "0.4.0",
+  "private": true,
+  "description": "本地优先的 X 灵感、记忆与创作工作区",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:desktop": "tsx tests/desktop.ts",
+    "test:topics": "tsx tests/desktop-topics.ts",
+    "test:calendar": "tsx tests/desktop-calendar.ts",
+    "test:recovery": "tsx tests/desktop-recovery.ts",
+    "test:clean-exit": "tsx tests/desktop-clean-exit.ts",
+    "test:memory": "tsx tests/desktop-memory.ts",
+    "pack:win": "pnpm build && electron-builder --win --x64",
+    "pack:mac": "pnpm build && electron-builder --mac --x64 --arm64"
+  },
+  "build": {
+    "appId": "app.xmemeory.desktop",
+    "productName": "XMemeory",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^3.0.44",
+    "@ai-sdk/openai-compatible": "^3.0.48",
+    "@tiptap/core": "^3.31.3",
+    "@tiptap/extension-file-handler": "^3.31.3",
+    "@tiptap/extension-image": "^3.31.3",
+    "@tiptap/extension-table": "^3.31.3",
+    "@tiptap/markdown": "^3.31.3",
+    "@tiptap/pm": "^3.31.3",
+    "@tiptap/react": "^3.31.3",
+    "@tiptap/starter-kit": "^3.31.3",
+    "ai": "^7.0.99",
+    "chokidar": "^5.0.0",
+    "lucide-react": "^1.45.0",
+    "playwright": "^1.63.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "twitter-text": "^3.1.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/twitter-text": "^3.1.10",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "44.3.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^30.0.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.0"
+  }
+}

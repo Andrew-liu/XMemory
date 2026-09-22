@@ -1,0 +1,51 @@
+import { _electron as electron, expect } from '@playwright/test'
+import { mkdirSync, mkdtempSync } from 'node:fs'
+import path from 'node:path'
+
+const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/memory')
+mkdirSync(temporary, { recursive: true })
+const userData = mkdtempSync(path.join(temporary, 'profile-'))
+const env: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), XMEMEORY_TEST_DATA: userData }
+delete env.ELECTRON_RUN_AS_NODE
+const app = await electron.launch({ ...(process.env.XMEMEORY_TEST_EXE ? { executablePath: process.env.XMEMEORY_TEST_EXE, args: [] } : { args: ['.'] }), env })
+try {
+  const page = await app.firstWindow()
+  await expect(page.getByRole('heading', { name: '这一周的灵感' })).toBeVisible()
+  await page.evaluate(async () => {
+    await window.xm.save({ id: 'x-1-11', kind: 'memory', title: 'Alice 的书签', body: '可检索正文甲\n\n![书签图片](../assets/demo.png)\n\n[原文](https://example.com/a/status/11)', author: 'alice', source: 'https://example.com/a/status/11', publishedAt: '2024-02-03T08:30:00.000Z' })
+    await window.xm.save({ id: 'x-1-22', kind: 'memory', title: 'Bob 的书签', body: '可检索正文乙，正文可能不完整，X 未返回完整内容。\n\n[原文](https://example.com/b/status/22)', author: 'bob', source: 'https://example.com/b/status/22', partial: true })
+  })
+  await page.getByRole('button', { name: '记忆' }).click()
+  await expect(page.getByText('安全测试版只访问两条固定内容')).toBeVisible()
+  const archiveControls = page.locator('.archive-controls')
+  await expect(archiveControls.getByRole('button', { name: '采集', exact: true })).toBeEnabled()
+  await expect(archiveControls.getByRole('button', { name: '暂停', exact: true })).toBeDisabled()
+  await expect(page.locator('.note-card').filter({ hasText: 'Alice 的书签' }).locator('time')).toHaveText('02/03')
+  await expect(page.getByRole('heading', { name: 'Alice 的书签' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Bob 的书签' })).toBeVisible()
+  await expect(page.getByLabel('采集进度')).toContainText('正文')
+  await expect(page.getByLabel('图片保存进度')).toContainText('图片已保存 0 · 失败 0')
+  await page.getByLabel('筛选作者').fill('alice')
+  await expect(page.getByRole('heading', { name: 'Alice 的书签' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Bob 的书签' })).toHaveCount(0)
+  await page.getByLabel('筛选作者').fill('')
+  await page.getByLabel('媒体类型').selectOption('partial')
+  await expect(page.getByRole('heading', { name: 'Bob 的书签' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Alice 的书签' })).toHaveCount(0)
+  await page.getByRole('heading', { name: 'Bob 的书签' }).click()
+  await expect(page.getByRole('button', { name: '打开原文' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '复制链接' })).toBeVisible()
+  await page.getByRole('button', { name: '复制链接' }).click()
+  await expect(page.getByText('已复制原文链接')).toBeVisible()
+  await page.getByRole('button', { name: '搜索所有内容' }).click()
+  await page.getByPlaceholder('搜索灵感、记忆和候选稿…').fill('可检索正文甲')
+  await expect(page.getByRole('heading', { name: 'Alice 的书签' })).toBeVisible()
+  await page.screenshot({ path: path.join(temporary, 'desktop-memory.png') })
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  await page.getByLabel('私有仓库', { exact: true }).fill('https://github.com/example/synthetic-memory.git')
+  await page.getByLabel('分支', { exact: true }).fill('master')
+  await page.getByRole('button', { name: '保存连接', exact: true }).click()
+  await expect(page.getByLabel('私有仓库', { exact: true })).toHaveValue('example/synthetic-memory')
+  await expect(page.getByLabel('分支', { exact: true })).toHaveValue('master')
+  console.log('PASS: 两条白名单提示、图片计数、记忆筛选搜索、完整仓库 URL 保存与 master 分支保留')
+} finally { await app.close() }
