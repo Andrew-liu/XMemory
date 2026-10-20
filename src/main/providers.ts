@@ -1,5 +1,12 @@
 import type { Provider } from '../shared/types'
 
+const legacyXSecrets = ['cookies', 'xState', 'xEndpoint']
+export function stripLegacyXSecrets(secrets: Record<string, string>) {
+  let removed = false
+  for (const key of legacyXSecrets) if (secrets[key] !== undefined) { delete secrets[key]; removed = true }
+  return removed
+}
+
 const reserved = new Set(['github', 'cookies', 'xState', '__proto__', 'prototype', 'constructor'])
 export function validateProviders(providers: Provider[], active: string, secretId?: string) {
   const ids = providers.map(p => p.id)

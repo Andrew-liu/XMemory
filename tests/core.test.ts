@@ -3,8 +3,6 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Library, safePath } from '../src/main/library'
-import { CookieWatcher, parseCookies } from '../src/main/cookies'
-import { RateLimiter } from '../src/main/rate-limit'
 import { GithubSync, githubTokenKind, mergeChoice, mergedHashes, normalizeGithubToken, normalizeRepository, runConfiguredStartupSync, syncAllowed } from '../src/main/sync'
 import { prepareMarkdown } from '../src/renderer/markdown'
 import { splitDifference, splitMatches } from '../src/renderer/highlight'
@@ -232,21 +230,6 @@ describe('本地 Markdown 资料库', () => {
     expect(() => l.addImage(Buffer.from('<script>'), 'image.png')).toThrow()
   })
 })
-it('Cookie 只接收 X 必需登录字段，并拒绝过期与注入', () => {
-  const cookie = (name: string, value: string, domain = '.x.com') => ({ name, value, domain, path: '/' })
-  const valid = [cookie('auth_token', 'synthetic-auth'), cookie('ct0', 'synthetic-csrf')]
-  expect(parseCookies(JSON.stringify([...valid, cookie('private', 'ignored', '.example.com')]))).toHaveLength(2)
-  expect(() => parseCookies(JSON.stringify(valid.map(v => ({ ...v, expirationDate: 1 }))))).toThrow()
-  expect(() => parseCookies(JSON.stringify([cookie('auth_token', 'bad;value'), valid[1]]))).toThrow()
-})
-it('限速冷却持久化且 429 退避递增', () => {
-  let now = 0
-  const limiter = new RateLimiter(undefined, () => {}, () => now, () => 0)
-  limiter.take(); expect(limiter.remaining()).toBe(8000)
-  expect(() => limiter.take()).toThrow()
-  now = 8000; limiter.limit(); expect(limiter.remaining()).toBe(1_800_000)
-  limiter.limit(); expect(limiter.remaining()).toBe(3_600_000)
-})
 it('同步判断区分单端修改和双方冲突，禁止凭据同步', () => {
   expect(mergeChoice('old', 'new', 'old')).toBe('local')
   expect(mergeChoice('old', 'old', 'new')).toBe('remote')
@@ -273,21 +256,4 @@ it('候选稿保留本地素材和实际读取的网络来源', () => {
   const reopened = new Library(l.root); libraries.push(reopened)
   expect(reopened.get(saved.id)).toMatchObject({ sources: ['memory-one'], agentMode: 'web', webSources: [{ title: '公开资料', url: 'https://example.com/article', source: 'example.com' }] })
 })
-it('自动接收已有导出、监听新文件、去重，并在关闭后停止', async () => {
-  const folder = mkdtempSync(path.join(temporary, 'cookies-'))
-  const exported = (value: string) => JSON.stringify(['auth_token','ct0'].map(name => ({ domain: '.x.com', path: '/', name, value })))
-  writeFileSync(path.join(folder, 'cookies.txt'), exported('synthetic-one'))
-  const values: string[] = []
-  const watcher = new CookieWatcher(async cookies => { values.push(cookies[0].value) }, () => {})
-  try {
-    await watcher.watch(folder)
-    expect(values).toEqual(['synthetic-one'])
-    writeFileSync(path.join(folder, 'x.com_cookies (1).json'), exported('synthetic-two'))
-    await expect.poll(() => values, { timeout: 5000 }).toEqual(['synthetic-one', 'synthetic-two'])
-    await watcher.import(path.join(folder, 'x.com_cookies (1).json'))
-    expect(values).toHaveLength(2)
-    await watcher.close()
-    writeFileSync(path.join(folder, 'x.com_cookies (2).json'), exported('synthetic-three'))
-    expect(watcher.status).toContain('内容未变化')
-  } finally { await watcher.close() }
-})
+

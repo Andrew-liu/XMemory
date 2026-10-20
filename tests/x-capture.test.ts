@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest'
 import type { BrowserContext } from 'playwright'
-import { articleDomMarkdown, articleMarkdown, captureFromPayload, chromeArgs, downloadChromeImage, mergeArticleDomBlocks, tallyTargetResults, targetPostId, TARGET_POSTS, updatedCaptureBody, X_LOGIN_URL } from '../src/main/x-cdp-target'
+import { chromeArgs, downloadChromeImage, X_LOGIN_URL } from '../src/main/x-capture'
+import { articleDomMarkdown, captureFromPayload, mergeArticleDomBlocks, updatedCaptureBody } from '../src/main/x-parse'
 
 it('图片通过 Chrome 标签页响应读取并关闭标签页，失败不会报告成功', async () => {
   const url = 'https://pbs.twimg.com/media/test.jpg'
@@ -81,16 +82,6 @@ it('Article 内嵌 X 推文只保留链接且多轮采集不会重复', () => {
   expect(markdown).not.toContain('内嵌推文正文')
 })
 
-it('首版只接受两个固定 X 状态 URL', () => {
-  expect(targetPostId(TARGET_POSTS[0])).toBe('2099104432596328908')
-  expect(targetPostId(`${TARGET_POSTS[1]}/`)).toBe('2099446491094175744')
-  expect(targetPostId('https://x.com/xueyu1125/status/1')).toBeUndefined()
-  expect(targetPostId('https://twitter.com/xueyu1125/status/2099104432596328908')).toBeUndefined()
-  expect(targetPostId(`${TARGET_POSTS[0]}?s=20`)).toBeUndefined()
-  expect(X_LOGIN_URL).toBe('https://x.com/i/flow/login')
-  expect(targetPostId(X_LOGIN_URL)).toBeUndefined()
-})
-
 it('首次登录使用普通 Chrome，只有采集模式启用 CDP', () => {
   const login = chromeArgs('profile', 'login')
   expect(login).toContain(X_LOGIN_URL)
@@ -102,14 +93,9 @@ it('首次登录使用普通 Chrome，只有采集模式启用 CDP', () => {
   expect(cdp).not.toContain(X_LOGIN_URL)
 })
 
-it('已有一条记录时只把另一条计为新增', () => {
-  expect(tallyTargetResults(['unchanged', 'created'])).toEqual({ created: 1, updated: 0, unchanged: 1 })
-  expect(tallyTargetResults(['updated', 'created'])).toEqual({ created: 1, updated: 1, unchanged: 0 })
-})
-
 it('短推响应保存正文、图片和用户笔记分区', () => {
   const captured = captureFromPayload({ data: { tweetResult: { result: {
-    rest_id: '2099104432596328908',
+    rest_id: '1111111111111111111',
     legacy: {
       full_text: '这是一条用于本地保存验收的短推。',
       created_at: 'Mon Sep 14 08:30:00 +0000 2026',
@@ -117,8 +103,8 @@ it('短推响应保存正文、图片和用户笔记分区', () => {
       entities: { urls: [] },
       extended_entities: { media: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/TEST.jpg' }] }
     },
-    core: { user_results: { result: { legacy: { screen_name: 'xueyu1125' } } } }
-  } } } }, '2099104432596328908')!
+    core: { user_results: { result: { legacy: { screen_name: 'someuser' } } } }
+  } } } }, '1111111111111111111', undefined, 'https://x.com/someuser/status/1111111111111111111')!
   expect(captured.post.partial).toBe(false)
   expect(captured.post.publishedAt).toBe('2026-09-14T08:30:00.000Z')
   expect(captured.structured.publishedAt).toBe('2026-09-14T08:30:00.000Z')
@@ -126,46 +112,52 @@ it('短推响应保存正文、图片和用户笔记分区', () => {
   expect(captured.markdown).toContain('用于本地保存验收')
   expect(captured.markdown).toContain('![X 图片 1](https://pbs.twimg.com/media/TEST.jpg)')
   expect(captured.markdown).toContain('# 我的笔记')
+  expect(captured.markdown).toContain('[原文](https://x.com/someuser/status/1111111111111111111)')
   expect(captured.structured.captureMethod).toBe('cdp-response')
+  expect(captured.structured.schemaVersion).toBe(2)
 })
 
-it('Article 响应优先转换结构块并保留表格原始结构', () => {
+it('长文响应通过 content_state 取得结构化正文并跳过 DOM', () => {
   const article = {
     title: '长文标题',
     preview_text: '预览',
-    content: { blocks: [
-      { type: 'heading', text: '第一节' },
-      { type: 'unstyled', text: '长文正文第一段。' },
-      { type: 'unordered-list-item', text: '列表项' },
-      { type: 'blockquote', text: '引用内容' },
-      { type: 'table', text: 'A | B' }
-    ] }
+    content_state: {
+      blocks: [
+        { key: 'b1', type: 'header-two', text: '第一节', data: {}, inlineStyleRanges: [], entityRanges: [] },
+        { key: 'b2', type: 'unstyled', text: '长文正文第一段。', data: {}, inlineStyleRanges: [], entityRanges: [] },
+        { key: 'b3', type: 'atomic', text: ' ', data: {}, inlineStyleRanges: [], entityRanges: [{ key: 0, offset: 0, length: 1 }] }
+      ],
+      entityMap: [{ key: '0', value: { type: 'MEDIA', mutability: 'IMMUTABLE', data: { mediaItems: [{ mediaId: '211' }] } } }]
+    },
+    media_entities: [{ media_id: '211', media_key: 'k', media_info: { __typename: 'ApiImage', original_img_url: 'https://pbs.twimg.com/media/A.jpg', original_img_width: 800, original_img_height: 600 } }]
   }
-  const markdown = articleMarkdown(article)
-  expect(markdown).toContain('# 长文标题')
-  expect(markdown).toContain('## 第一节')
-  expect(markdown).toContain('- 列表项')
-  expect(markdown).toContain('> 引用内容')
   const captured = captureFromPayload({ data: { threaded_conversation_with_injections_v2: {
     instructions: [{ entries: [{ content: { itemContent: { tweet_results: { result: {
-      rest_id: '2099446491094175744',
-      legacy: { full_text: 'https://t.co/article', truncated: false, entities: { urls: [{ expanded_url: 'https://x.com/i/article/2099421537489100800' }] } },
-      core: { user_results: { result: { legacy: { screen_name: 'xueyu1125' } } } },
+      rest_id: '2222222222222222222',
+      legacy: { full_text: 'https://t.co/article', truncated: false, entities: { urls: [{ url: 'https://t.co/article', expanded_url: 'https://x.com/i/article/2222222222222222222' }] } },
+      core: { user_results: { result: { legacy: { screen_name: 'someuser' } } } },
       article: { article_results: { result: article } }
     } } } } }] }]
-  } } }, '2099446491094175744')!
+  } } }, '2222222222222222222', undefined, 'https://x.com/someuser/status/2222222222222222222')!
   expect(captured.post.partial).toBe(false)
+  expect(captured.articleResult).toBeDefined()
+  expect(captured.articleTitle).toBe('长文标题')
+  expect(captured.markdown).toContain('# 长文标题')
+  expect(captured.markdown).toContain('## 第一节')
   expect(captured.markdown).toContain('长文正文第一段')
-  expect((captured.structured.article as { blocks: unknown[] }).blocks).toHaveLength(5)
+  expect(captured.markdown).toContain('![X 图片](https://pbs.twimg.com/media/A.jpg)')
+  expect(captured.post.images).toContain('https://pbs.twimg.com/media/A.jpg')
 })
 
-it('Article 只有预览时必须标记不完整', () => {
+it('Article 缺少 content_state 时必须标记不完整并回退 DOM', () => {
   const captured = captureFromPayload({
-    rest_id: '2099446491094175744',
-    legacy: { full_text: 'https://t.co/article', truncated: false, entities: { urls: [{ expanded_url: 'https://x.com/i/article/2099421537489100800' }] } },
-    core: { user_results: { result: { legacy: { screen_name: 'xueyu1125' } } } },
+    rest_id: '2222222222222222222',
+    legacy: { full_text: 'https://t.co/article', truncated: false, entities: { urls: [{ url: 'https://t.co/article', expanded_url: 'https://x.com/i/article/2222222222222222222' }] } },
+    core: { user_results: { result: { legacy: { screen_name: 'someuser' } } } },
     article: { article_results: { result: { title: '只有标题', preview_text: '只有预览' } } }
-  }, '2099446491094175744')!
+  }, '2222222222222222222', undefined, 'https://x.com/someuser/status/2222222222222222222')!
   expect(captured.post.partial).toBe(true)
+  expect(captured.articleResult).toBeUndefined()
+  expect(captured.structured.partialReasons).toContain('content-state-missing')
   expect(captured.markdown).toContain('正文可能不完整')
 })

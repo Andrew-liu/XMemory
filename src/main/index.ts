@@ -1,21 +1,17 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu, Tray, nativeImage, clipboard, ClipboardItem } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, session, Menu, Tray, nativeImage, clipboard, ClipboardItem } from 'electron'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { Library, atomic, safePath } from './library'
-import { CookieWatcher, type CookieRecord } from './cookies'
-import { XArchive } from './x-source'
 import { GithubSync, githubTokenKind, normalizeGithubToken, normalizeRepository, runConfiguredStartupSync } from './sync'
 import { githubNetworkFetch } from './github-network'
 import { generate } from './ai'
-import { validateProviders } from './providers'
+import { stripLegacyXSecrets, validateProviders } from './providers'
 import type { Settings, Snapshot } from '../shared/types'
 import { validDate } from '../shared/calendar'
-import { xNetworkFetch } from './x-network'
-import { XSession, cookiesFromStorage, type CapturedEndpoint, type StorageState } from './x-session'
-import { CdpTargetArchive } from './x-cdp-target'
+import { XCapture } from './x-capture'
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 let win: BrowserWindow
@@ -51,19 +47,15 @@ async function ensureSaved() {
   }
 }
 let library: Library
-let archive: XArchive
-let targetArchive: CdpTargetArchive
+let capture: XCapture
 let sync: GithubSync
-let cookieWatcher: CookieWatcher
-let xSession!: XSession
 let controller: AbortController | undefined
-let credentials: CookieRecord[] = []
 let settings: Settings
 let settingsFile: string
 let secretsFile: string
 let secrets: Record<string,string> = {}
 let tick: ReturnType<typeof setInterval>
-const defaults: Settings = { theme: 'system', providers: [{ id: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' }], activeProvider: 'deepseek', scanMinutes: 30, collect: false, closeToTray: true, branch: 'main' }
+const defaults: Settings = { theme: 'system', providers: [{ id: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' }], activeProvider: 'deepseek', closeToTray: true, branch: 'main' }
 const changed = () => { if (win && !win.isDestroyed()) win.webContents.send('xm:changed') }
 const persist = () => atomic(settingsFile, JSON.stringify(settings))
 function saveSecrets(nextSecrets = secrets) {
@@ -78,26 +70,13 @@ function saveSecrets(nextSecrets = secrets) {
 async function openLibrary(root: string) {
   if (controller || sync?.running) throw new Error('请等待创作和同步结束后切换资料库')
   const nextLibrary = new Library(root, changed)
-  archive?.pause(); targetArchive?.pause(); await cookieWatcher?.close(); await library?.close()
+  capture?.pause(); await library?.close()
   library = nextLibrary; library.start()
-  archive = new XArchive(library, () => credentials, changed, (input, init) => xSession.hasWorker() || xSession.loggedIn ? xSession.fetch(input, init) : xNetworkFetch(input, init))
-  targetArchive = new CdpTargetArchive(library, app.getPath('userData'), changed)
+  capture = new XCapture(library, app.getPath('userData'), changed)
   sync = new GithubSync(library, changed, githubNetworkFetch, () => rendererDirty)
-  cookieWatcher = new CookieWatcher(async candidate => {
-    const previous = secrets.cookies
-    try { secrets.cookies = JSON.stringify(candidate); saveSecrets() }
-    catch (e) { if (previous === undefined) delete secrets.cookies; else secrets.cookies = previous; throw e }
-    archive.pause()
-    credentials = candidate
-    await xSession.importCookies(candidate)
-    archive.status = 'Cookie 已保存到旧兼容会话；CDP 测试版请使用独立 Chrome 登录'
-    changed()
-  }, () => changed())
-  if (credentials.length) cookieWatcher.status = secrets.xState ? '已记住浏览器登录态；可直接检查登录或扫描' : '已从本机加密存储载入 Cookie；登录状态需联网验证'
-  if (settings.cookieDirectory) await cookieWatcher.watch(settings.cookieDirectory).catch(() => { cookieWatcher.status = '自动接收目录不可访问，请重新选择目录' })
 }
 const providerSchema = z.object({ id: z.string().regex(/^[\w-]+$/), name: z.string().trim().min(1).max(80), baseURL: z.url().refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password }), model: z.string().trim().min(1).max(150) })
-const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), providers: z.array(providerSchema).max(20).optional(), activeProvider: z.string().optional(), scanMinutes: z.number().int().min(15).max(1440).optional(), collect: z.boolean().optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional() })
+const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), providers: z.array(providerSchema).max(20).optional(), activeProvider: z.string().optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional() })
 async function copyImageToClipboard(bytes: Buffer, richText = false) {
   const image = nativeImage.createFromBuffer(bytes)
   if (image.isEmpty()) throw new Error('图片无法读取')
@@ -116,7 +95,7 @@ async function dispatch(method: string, args: unknown[]) {
     atomic(path.join(app.getPath('userData'), 'recovery-notice.json'), JSON.stringify({ file }))
     return file
   }
-  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, settings: { ...settings, providers: settings.providers.map(p => ({ ...p, hasKey: !!secrets[p.id] })), hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github) }, status: library.errors.join('；'), xStatus: targetArchive.status, cookieStatus: 'CDP 使用独立 Chrome Profile 保存登录态', syncStatus: sync.status, archive: targetArchive.progress, xLoggedIn: targetArchive.loggedIn } satisfies Snapshot
+  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, settings: { ...settings, providers: settings.providers.map(p => ({ ...p, hasKey: !!secrets[p.id] })), hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github) }, status: library.errors.join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn } satisfies Snapshot
   if (method === 'save') {
     const note = z.object({ id: z.string().optional(), kind: z.enum(['inspiration','memory','draft','topic']), title: z.string().max(400), body: z.string().max(4_000_000), tags: z.array(z.string()).max(50).optional(), groupId: z.string().optional(), parentId: z.string().optional(), scheduledDate: z.string().refine(validDate).optional(), completed: z.boolean().optional(), author: z.string().max(80).optional(), source: z.string().max(500).optional(), publishedAt: z.iso.datetime().optional(), sortOrder: z.number().int().min(0).optional(), partial: z.boolean().optional(), capturedImages: z.array(z.string().max(500)).max(40).optional() }).parse(args[0])
     return library.save(note, z.string().optional().parse(args[1]))
@@ -174,21 +153,12 @@ async function dispatch(method: string, args: unknown[]) {
     settings = { ...settings, ...next, ...(secret?.githubKey !== undefined ? { githubTokenSavedAt: new Date().toISOString() } : {}) }; persist()
     changed(); return
   }
-  if (method === 'importCookies') {
-    const result = await dialog.showOpenDialog(win, { filters: [{ name: 'Cookie 导出文件', extensions: ['txt', 'json'] }], properties: ['openFile'] })
-    if (!result.canceled) await cookieWatcher.import(result.filePaths[0]); return
-  }
-  if (method === 'watchCookies') {
-    const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
-    if (!result.canceled) { settings.cookieDirectory = result.filePaths[0]; persist(); await cookieWatcher.watch(result.filePaths[0]); changed() }; return
-  }
-  if (method === 'loginX') return targetArchive.login()
-  if (method === 'connectX') return targetArchive.checkLogin()
-  if (method === 'showX') return targetArchive.showWindow()
-  if (method === 'disconnectX') return targetArchive.disconnect()
-  if (method === 'collectTestPosts') return targetArchive.collectWithLogin()
-  if (method === 'pauseScan') return targetArchive.pause()
-  if (method === 'retryFailed') throw new Error('CDP 测试版本暂不批量补抓附件，请重新采集两条测试内容')
+  if (method === 'loginX') return capture.login()
+  if (method === 'connectX') return capture.checkLogin()
+  if (method === 'showX') return capture.showWindow()
+  if (method === 'disconnectX') return capture.disconnect()
+  if (method === 'collectUrl') return capture.collectUrl(z.string().max(2000).parse(args[0]))
+  if (method === 'pauseScan') return capture.pause()
   if (method === 'sync') return sync.run(settings.repo || '', settings.branch, secrets.github || '')
   if (method === 'checkSync') return sync.check(settings.repo || '', settings.branch, secrets.github || '')
   if (method === 'cancel') { controller?.abort(); return }
@@ -217,19 +187,21 @@ app.whenReady().then(async () => {
   if (!primaryInstance) return
   mkdirSync(app.getPath('userData'), { recursive: true })
   settingsFile = path.join(app.getPath('userData'), 'settings.json'); secretsFile = path.join(app.getPath('userData'), 'credentials.bin')
-  settings = { ...defaults, ...(existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile,'utf8')) : {}) }
-  if (existsSync(secretsFile)) { try { secrets = JSON.parse(safeStorage.decryptString(readFileSync(secretsFile))); credentials = JSON.parse(secrets.cookies || '[]') } catch { secrets = {} } }
-  xSession = new XSession((state: StorageState, endpoint?: CapturedEndpoint) => {
-    secrets.xState = JSON.stringify(state)
-    if (endpoint) secrets.xEndpoint = JSON.stringify(endpoint)
-    credentials = cookiesFromStorage(state)
-    saveSecrets()
-  }, message => { if (cookieWatcher) cookieWatcher.status = message; changed() })
-  await xSession.prepare()
+  const stored: Record<string, unknown> = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile,'utf8')) : {}
+  for (const legacy of ['scanMinutes', 'collect', 'cookieDirectory']) delete stored[legacy]
+  settings = { ...defaults, ...stored }
+  if (existsSync(secretsFile)) { try { secrets = JSON.parse(safeStorage.decryptString(readFileSync(secretsFile))) } catch { secrets = {} } }
+  if (stripLegacyXSecrets(secrets)) { try { saveSecrets() } catch { /* Retry on the next launch. */ } }
+  if (!settings.legacyXCleanedAt) {
+    try {
+      await session.fromPartition('persist:xmemeory-x').clearStorageData()
+      settings.legacyXCleanedAt = new Date().toISOString()
+      persist()
+    } catch { /* Retry on the next launch. */ }
+  }
   const rootFile = path.join(app.getPath('userData'), 'library-path.json')
   await openLibrary(existsSync(rootFile) ? JSON.parse(readFileSync(rootFile, 'utf8')) : path.join(app.getPath('userData'), 'library'))
-  await targetArchive.restore()
-  settings.collect = false
+  await capture.restore()
   persist()
   win = new BrowserWindow({ width: 1360, height: 900, minWidth: 960, minHeight: 640, title: 'XMemeory', backgroundColor: '#f7f8fa', titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', webPreferences: { preload: path.join(dir, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -274,11 +246,9 @@ app.on('before-quit', e => {
   void (async () => {
     await ensureSaved()
     if (sync?.running) throw new Error('正在同步，请同步完成后退出')
-    controller?.abort(); archive?.pause(); targetArchive?.pause(); clearInterval(tick)
+    controller?.abort(); capture?.pause(); clearInterval(tick)
     await generation
-    await cookieWatcher?.close()
-    await targetArchive?.shutdown()
-    await xSession?.shutdown()
+    await capture?.shutdown()
     // The OS closes SQLite after exit. In-flight archive requests may still finish before exit.
     quitting = true; app.quit()
   })().catch(e => dialog.showErrorBox('尚未退出', e.message)).finally(() => { closing = false })

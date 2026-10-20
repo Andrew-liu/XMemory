@@ -1,5 +1,110 @@
 # XMemeory 设计方案
 
+## v0.5.0 — 记忆可用：粘贴链接单条采集（2026-10-20）
+
+状态：已确认（2026-10-20）。用户确认本节全部范围；引用推文维持仅保留链接，不在本版扩展。
+
+执行结果：已实现。类型检查、106 项核心测试、构建、记忆与主桌面专项通过；真实长文及两条短推验收通过，详见 ChangeLog。验收中发现链接卡片同图多尺寸被重复保存，已增加图片去重并复测。用户已明确：下一版先做“粘贴链接单条采集”，书签批量放到 v0.5.1；v0.1 遗留的 Electron 登录、Cookie 导入、GraphQL 重放代码本版删除；用户反馈的问题为“采到的内容质量差”和“登录/采集报错”。2026-10-20 用用户提供的长文链接实测，用户确认 DOM 采集效果可以接受。
+
+### 背景与目标
+
+v0.2.0 第一阶段的两条白名单内容早在 2026-09-15 就已经以 `complete` 状态保存，图片也已本地化，但后续阶段没有推进，记忆页至今只能采集这两条固定内容。2026-10-20 用临时副本（只放开白名单）采集 `zureA255062/status/2111642497927798995`（X Article），结果如下：
+
+- DOM 通道成功时：260/260 段正文、10/10 个二级标题、8/8 个代码块、21 张正文图片位置均正确，判定为 `complete`。
+- 存在的问题：3 个引用块和 92 个列表项丢失格式（有序列表编号也丢失）；图片均保存为 `name=small`（约 680px 宽）；封面未保存；列表标题取自正文首段而不是文章标题；进度文案写死“两条”。
+- DOM 通道失败时的兜底结果不可用：X 现在把长文正文放在 `article.content_state.blocks`（Draft.js 结构，本例 291 块，含标题、列表、引用、atomic 媒体），而现有代码读取的是 `article.content.blocks`，结果只剩标题、122 字预览和堆在末尾的图片，并被标记为 `partial`。
+
+目标：让用户能把任意一条 X 推文或长文的链接粘贴进来完成采集；长文以结构化响应为主通道，DOM 作为兜底；修复上述质量问题；删除不再使用的 v0.1 代码，并把 CDP 采集拆分为可测试的模块。
+
+### 功能范围与非目标
+
+范围：
+
+1. 记忆页新增链接输入框和“采集”按钮，一次采集一条。接受的链接形式：`https://(www.|mobile.)?(x|twitter).com/<用户>/status/<数字ID>`、`https://x.com/i/web/status/<数字ID>`、`https://x.com/<用户>/article/<数字ID>`（该 ID 即推文 ID，已实测）。去掉查询参数和锚点后，统一规范化为 `https://x.com/<用户>/status/<ID>`。其他主机、协议、`/i/article/<文章ID>` 或带凭据的链接一律拒绝，并提示“请粘贴推文链接”，不发出任何请求。
+2. 长文采集改为“结构化优先”：从页面自然产生的 `TweetResultByRestId`/`TweetDetail` 响应中解析 `content_state`，覆盖 unstyled、header-one/two/three、有序/无序列表（编号连续，遇到非列表块重新计数）、blockquote、code-block 以及 atomic（媒体、代码块、内嵌推文、分隔线），并处理 inlineStyleRanges 中的粗体/斜体和 entityRanges 中的链接。结构化解析成功时不再滚动 DOM；只有缺少 `content_state` 或其为空时才走现有 DOM 通道，DOM 通道保持现状。
+3. 质量修复：图片依次尝试 `name=orig` → `large`，失败才保留原链接；长文封面保存在正文开头；记忆标题优先取文章标题，普通推文取首行，最长 80 字；短推的 `t.co` 替换为 `expanded_url`，删除正文末尾指向媒体的 `t.co`，还原 `&amp; &lt; &gt;`；作者取自响应或规范化链接，删除写死的 `xueyu1125` 兜底；进度文案改为按实际条数显示。
+4. 报错细化：区分 Chrome 未安装、专属 Profile 被残留 Chrome 占用、调试端点超时、需要登录或安全验证、页面导航失败或超时、未取得正文，各给出不同提示；不再吞掉长文页的导航错误，失败原因写入 `partialReasons`。登录等待期间提示“若关闭窗口后仍在等待，请确认 Chrome 没有在后台继续运行”。
+5. 删除 v0.1 遗留代码：`x-source.ts` 中的批量归档逻辑、`x-session.ts`、`x-auth.ts`、`x-client.ts`、`x-network.ts`、`cookies.ts`、`rate-limit.ts`，以及对应的 IPC（`importCookies`、`watchCookies`、`retryFailed`）、设置项（`scanMinutes`、`collect`、`cookieDirectory`）和 Snapshot 字段 `cookieStatus`。仍在使用的 `parseTweetResult`、`allowedImage`、`imageCandidates`、`ArchivedPost` 先迁到新模块，再删除原文件。
+
+非目标：书签列表读取、批量采集、定时或启动自动采集（v0.5.1 起）；完整推文串、回复和评论区；引用推文全文（仅保留链接，用户确认本版不扩展）；视频下载；站外网页全文；登录流程重做（仍为“普通 Chrome 登录 → 关闭 → CDP 采集”）。
+
+### 主要使用流程
+
+1. 用户在记忆页粘贴链接，点击“采集”。链接无效时就地提示，不发请求。
+2. 已登录时，Chrome 在屏幕外打开该推文页；未登录时沿用现有登录流程，登录完成后自动继续本次采集。
+3. 先下载图片，再一次性写入正文，进度显示“图片 x/y”；完成后列表出现该记忆并自动选中。
+4. 同一条已存在时，仅更新“X 原文”部分，“我的笔记”和用户编辑过的正文沿用现有保护规则；结果区分“新增 / 已更新 / 无变化”。
+5. 采集期间输入框和按钮不可用，可以点击“暂停”中止；中止不会写入半截正文。
+
+### 技术方案与模块职责
+
+- `src/main/x-parse.ts`（新增，纯函数）：`normalizePostUrl(input) → { url, id, user? } | undefined`；`parseTweetResult`（迁入，并补充 t.co 展开和实体还原）；`articleFromContentState(article) → { title, markdown, blocks, images, coverUrl, unknownTypes }`；`allowedImage`、`imageCandidates`（迁入，`orig` 排在最前）；`memoryTitle(post)`。
+- `src/main/x-cdp-target.ts` → 重命名为 `x-capture.ts`：保留 Chrome Profile/CDP 生命周期、登录、窗口位置和 DOM 兜底；删除 `TARGET_POSTS` 与 `targetPostId`，对外提供 `collectUrl(url)`；`collectOne` 改为先结构化、后 DOM 兜底。
+- `index.ts`：删除 `XArchive`、`XSession`、`CookieWatcher` 及其初始化；IPC `collectTestPosts` 替换为 `collectUrl(url: string)`，用 zod 校验字符串长度后交给 `normalizePostUrl` 二次校验。
+- 渲染层：`Memory.tsx` 去掉白名单文案，新增输入框；设置页的 X 区块改名为“X 采集”，删除 Cookie 相关文案。
+
+### 接口与数据结构
+
+- Bridge：删除 `importCookies`、`watchCookies`、`collectTestPosts`、`retryFailed`；新增 `collectUrl(url: string): Promise<{ id: string; result: 'created' | 'updated' | 'unchanged' }>`。
+- Settings：删除 `scanMinutes`、`collect`、`cookieDirectory`；旧 `settings.json` 中的这些字段读取时忽略，下次保存时不再写入。
+- 记忆 Markdown：格式不变（Front Matter + “# X 原文” + “# 我的笔记”），Note ID 仍为 `x-<账号ID>-<推文ID>`，存放在 `memories/<账号ID>/<推文ID>.md`。
+- `metadata/<noteId>.capture.json`：`schemaVersion` 升为 2；`captureMethod` 取 `cdp-response`（结构化）、`cdp-dom` 或 `cdp-hybrid`；新增 `partialReasons`（如 `content-state-missing`、`unknown-block:<type>`、`media-unresolved`、`article-navigation-failed`）和 `coverImage`。旧版 1 文件照常读取。
+
+### 完整性判定（调整 v0.2.0 第 7 节）
+
+- 实测结构（2026-10-20）：`content_state = { blocks, entityMap }`，entityMap 为数组 `[{ key: "12", value: { type, mutability, data } }]`，块的 `entityRanges[].key`（数字）对应元素的 `key` 字段而非数组下标；实体类型见 MEDIA（`data.mediaItems[].mediaId` → `media_entities[].media_id` → `media_info.original_img_url`）、MARKDOWN（`data.markdown` 自带代码围栏）、DIVIDER；行内样式见 `Bold`；封面在 `cover_media`，不在 `media_entities`。LINK、TWEET 等未在样本中出现，按 Draft.js 惯例尽力处理，未知类型记入 `partialReasons`。
+- 结构化通道：`content_state.blocks` 中有非空正文块，所有块类型都已识别，所有 atomic 媒体都能映射到 `media_entities`，即判定为 `complete`。存在未知块或未映射媒体时为 `partial`，并记录原因。结构化数据就是完整正文，因此不再要求“滚动到底部”。
+- DOM 通道：沿用现有“到达底部且连续两轮无新增块”的规则。
+- 两个通道都没有取得正文时报错，不写入空记录。
+
+### 异常与边界
+
+- 链接有效但推文已删除、受保护、受地区限制或需要登录：给出明确原因，不写入记录。
+- 响应中有 `article` 但没有 `content_state`：回退 DOM；DOM 也失败时报错，不再用预览冒充正文。
+- 图片 `orig` 超过 20 MiB 或下载失败时依次降级；全部失败则保留原链接，`attachmentStatus` 标为 `remote-only` 或 `partial`。
+- 同一时间只允许一个采集任务；暂停后丢弃本次未写入的结果。
+
+### 兼容性与数据迁移
+
+- 已有记忆文件和 `capture.json` 不改写；再次采集时才写入新版字段。
+- 启动时若 `credentials.bin` 中存在 `cookies`、`xState`、`xEndpoint`，删除这三项并重新加密保存，模型 Key 和 GitHub Token 不受影响；同时清除 Electron 分区 `persist:xmemeory-x` 的存储数据。仅在首次启动执行一次，并以 `settings.json` 中的标记防止重复执行。用户已确认清除这部分旧登录态。
+- CDP 专属 Chrome Profile（`x-cdp-profile`）保持不动，现有登录态继续可用。
+- 同步白名单不变。
+
+### 阶段任务
+
+1. 新建 `x-parse.ts`，迁入共用函数，补充 URL 规范化、`content_state` 解析、t.co/实体处理、标题和图片尺寸逻辑，并编写单元测试。
+2. 改造 `x-capture.ts`：去掉白名单，实现“结构化优先 + DOM 兜底”、封面、作者、报错细化和进度文案。
+3. 删除 v0.1 遗留模块、IPC、设置项和测试，加入旧凭据与分区的一次性清理。
+4. 渲染层：链接输入、结果反馈、设置页文案调整。
+5. 类型检查、核心测试、构建、桌面记忆专项；真实链接验收；更新 README、ChangeLog 和版本号。
+
+### 功能测试用例
+
+单元测试（合成数据，不提交真实推文原文）：
+
+- URL：上述各种合法形式规范化结果正确；`/i/article/<id>`、http、其他主机、带凭据、非数字 ID、空串一律拒绝。
+- `content_state`：合成样本覆盖所有块类型、有序列表编号连续与重新计数、粗体/斜体/链接区间（含中文与 emoji 的 UTF-16 偏移）、atomic 媒体映射、代码块、未知块 → `partial`、空 blocks → 回退。实现前用测试链接再取一次真实响应，确认 entityMap 的实际字段后制作脱敏样本。
+- 短推：t.co 展开、末尾媒体链接删除、HTML 实体还原、Note Tweet 优先。
+- 图片候选顺序 `orig → large → medium`；标题取值；作者取自响应或链接。
+- 旧凭据清理只删除三项 X 字段，其余密钥保留，且只执行一次；旧设置字段被忽略。
+- 再次采集不覆盖“我的笔记”（沿用现有用例）。
+
+桌面专项（真实 Electron、合成资料库）：记忆页输入非法链接时出现提示且没有发起采集；按钮在采集中被禁用；设置页不再出现 Cookie 入口。
+
+真实账号人工验收（需用户在场或授权）：
+
+- `zureA255062/status/2111642497927798995`：标题、10 个二级标题、列表编号、3 个引用块、8 个代码块、21 张正文图片加封面都在原位，图片宽度大于 680px，状态为 `complete`。
+- 另外各采集 1 条带图短推和 1 条含链接短推，核对正文、链接和图片。
+- 对已采集条目在“我的笔记”中写字后重新采集，笔记保留。
+
+### 验收标准
+
+- 任意合法推文或长文链接都能采集；非法链接零请求。
+- 测试长文的正文、结构和图片与原文一致，且不依赖 DOM 滚动；DOM 兜底仍然可用。
+- 代码中不再存在白名单、写死的作者以及 v0.1 遗留模块；类型检查、核心测试、构建、记忆桌面专项全部通过。
+- 旧 X 凭据已清除，其他凭据完好；已有记忆可正常打开、搜索并作为创作素材。
+
 ## v0.4.2 — 已实现功能缺陷检查
 
 状态：依据用户要求检查现有功能，修复可复现缺陷，不扩展双链或嵌入。

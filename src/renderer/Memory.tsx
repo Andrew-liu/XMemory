@@ -12,9 +12,12 @@ export function memoryMatches(note: Note, query: string, author: string, media: 
   if (media === 'partial') return !!note.partial || note.body.includes('正文可能不完整') || note.body.includes('附件待补抓') || note.body.includes('视频未下载')
   return true
 }
-export function MemoryToolbar({ status, archive, query, setQuery, author, setAuthor, media, setMedia, view, setView, collect, pause }: {
+export function MemoryToolbar({ status, archive, link, setLink, collect, query, setQuery, author, setAuthor, media, setMedia, view, setView, pause }: {
   status: string
   archive: ArchiveProgress
+  link: string
+  setLink: (value: string) => void
+  collect: () => void
   query: string
   setQuery: (value: string) => void
   author: string
@@ -23,19 +26,17 @@ export function MemoryToolbar({ status, archive, query, setQuery, author, setAut
   setMedia: (value: MediaFilter) => void
   view: 'list' | 'card'
   setView: (value: 'list' | 'card') => void
-  collect: () => void
   pause: () => void
 }) {
-  const active = archive.phase === 'targeted' || archive.phase === 'connecting'
-  const phase = archive.phase === 'targeted' ? '定向采集中' : archive.phase === 'paused' ? '已暂停' : archive.phase === 'complete' ? '两条测试完成' : archive.phase === 'partial' ? '部分失败' : archive.phase === 'connecting' ? '等待登录' : '待命'
+  const active = archive.phase === 'collecting' || archive.phase === 'connecting'
+  const phase = archive.phase === 'collecting' ? '采集中' : archive.phase === 'connecting' ? '等待登录' : archive.phase === 'complete' ? '采集完成' : archive.phase === 'partial' ? '采集失败' : archive.phase === 'paused' ? '已暂停' : '待命'
   return <div className="archive-controls">
     <p aria-label="X 登录状态">{status}</p>
-    <p aria-label="采集进度">{phase} · 发现 {archive.found} · 正文 {archive.saved}{archive.lastSuccessAt ? ` · 最近 ${new Date(archive.lastSuccessAt).toLocaleString('zh-CN')}` : ''}</p>
+    <p aria-label="采集进度">{phase}{archive.lastSuccessAt ? ` · 最近 ${new Date(archive.lastSuccessAt).toLocaleString('zh-CN')}` : ''}</p>
     <p aria-label="图片保存进度">图片已保存 {archive.imagesDone} · 失败 {archive.imagesFailed}{archive.imagesFailed > 0 ? ' · 失败图片保留远程链接，可重新采集重试' : ''}</p>
-    <p>安全测试版只访问两条固定内容，不读取或滚动书签列表：</p>
-    <p className="path-text">2099104432596328908 · 2099446491094175744</p>
     <div className="button-row">
-      <button className="primary" disabled={active} onClick={collect}><RefreshCw size={14}/>{active ? (archive.phase === 'connecting' ? '等待登录' : '采集中') : '采集'}</button>
+      <input aria-label="推文链接" placeholder="粘贴 X 推文或长文链接" value={link} disabled={active} onChange={e => setLink(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && link.trim() && !active) collect() }}/>
+      <button className="primary" disabled={active || !link.trim()} onClick={collect}><RefreshCw size={14}/>{active ? (archive.phase === 'connecting' ? '等待登录' : '采集中') : '采集'}</button>
       <button disabled={!active} onClick={pause}><Pause size={14}/>暂停</button>
     </div>
     <div className="memory-filters">

@@ -1,6 +1,6 @@
 <h1 align="center">XMemeory</h1>
 <p align="center">
-  <img alt="版本 0.4.2" src="https://img.shields.io/badge/version-0.4.2-5265b5">
+  <img alt="版本 0.5.0" src="https://img.shields.io/badge/version-0.5.0-5265b5">
   <img alt="开发中" src="https://img.shields.io/badge/status-in%20development-blue">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
@@ -25,12 +25,13 @@ XMemeory 是一款本地优先的桌面写作 App，将短推灵感、参考资�
 
 ## 记忆
 
-- 保存参考内容的正文、原文链接和图片，不下载视频文件。
+- 粘贴一条 X 推文或长文链接即可采集，保存正文、原文链接和原图，不下载视频文件。
+- 长文保留标题、列表、引用、代码块、封面和原位配图；短推的短链接还原为真实地址。
 - 提供列表与卡片视图，可按正文、作者和媒体类型筛选。
-- 显示图片保存结果，失败时保留远程链接，支持重新采集。
+- 显示图片保存结果，失败时保留远程链接，支持重新采集；重新采集不覆盖自己的笔记。
 - 保留自己的笔记，方便后续查阅和作为创作素材。
 
-> 当前采集仅开放两条固定内容的定向测试，全量历史书签归档和定时新增书签采集尚未开放。
+> 采集使用本机正式版 Google Chrome 的独立 Profile，首次需在 Chrome 中手动登录 X。书签列表、批量和定时采集尚未开放；不采集推文串、回复和引用推文正文。
 
 ## 编辑与图片
 

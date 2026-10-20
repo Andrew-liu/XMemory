@@ -1,7 +1,8 @@
 import { chromium, expect } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { downloadChromeImage, updatedCaptureBody } from '../src/main/x-cdp-target'
+import { downloadChromeImage } from '../src/main/x-capture'
+import { updatedCaptureBody } from '../src/main/x-parse'
 import { Library } from '../src/main/library'
 
 const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/browser-images')
