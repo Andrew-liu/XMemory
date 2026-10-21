@@ -1,6 +1,5 @@
 import { expect, it } from 'vitest'
-import { articleFromContentState, captureFromPayload, dedupeImages, imageCandidates, memoryTitle, normalizePostUrl, parseTweetResult, type ArchivedPost } from '../src/main/x-parse'
-import { stripLegacyXSecrets } from '../src/main/providers'
+import { articleFromContentState, bookmarkEntries, captureFromPayload, dedupeImages, imageCandidates, memoryTitle, normalizePostUrl, parseTweetResult, type ArchivedPost } from '../src/main/x-parse'
 
 it('规范各种合法推文与长文链接', () => {
   const target = { url: 'https://x.com/alice/status/1234567890123456789', id: '1234567890123456789', user: 'alice' }
@@ -310,9 +309,124 @@ it('结构化记录保留长文原始结构便于重渲染', () => {
   expect(stored.coverMedia).toEqual(article.cover_media)
 })
 
-it('旧凭据清理只删除 X 字段，其余密钥保留', () => {
-  const secrets = { cookies: 'a', xState: 'b', xEndpoint: 'c', github: 'keep', deepseek: 'keep' }
-  expect(stripLegacyXSecrets(secrets)).toBe(true)
-  expect(secrets).toEqual({ github: 'keep', deepseek: 'keep' })
-  expect(stripLegacyXSecrets({ github: 'keep' })).toBe(false)
+const bookmarkTweetResult = (id: string, extra: Record<string, unknown> = {}) => ({ __typename: 'Tweet', rest_id: id, legacy: { full_text: `合成书签 ${id}`, truncated: false, entities: { urls: [] } }, core: { user_results: { result: { legacy: { screen_name: `user${id}` } } } }, ...extra })
+const bookmarkEntry = (id: string, result: unknown = bookmarkTweetResult(id), itemExtra: Record<string, unknown> = {}) => ({ entryId: `tweet-${id}`, content: { entryType: 'TimelineTimelineItem', itemContent: { itemType: 'TimelineTweet', tweet_results: { result }, ...itemExtra } } })
+const bookmarkCursor = (kind: 'Top' | 'Bottom', value = `cursor-${kind}`) => ({ entryId: `cursor-${kind.toLowerCase()}-1`, content: { entryType: 'TimelineTimelineCursor', cursorType: kind, value } })
+const bookmarksPayload = (entries: unknown[], root: Record<string, unknown> = {}) => ({ data: { bookmark_timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries }] } } }, ...root })
+
+it('书签响应按顺序取出推文、底部游标，包装条目被解包', () => {
+  const payload = bookmarksPayload([
+    bookmarkCursor('Top'),
+    bookmarkEntry('101'),
+    bookmarkEntry('102', { __typename: 'TweetWithVisibilityResults', tweet: bookmarkTweetResult('102') }),
+    bookmarkEntry('103', bookmarkTweetResult('103'), { promotedMetadata: { promoted: true } }),
+    bookmarkCursor('Bottom', 'bottom-value')
+  ])
+  const parsed = bookmarkEntries(payload)
+  expect(parsed.found).toBe(true)
+  expect(parsed.tweets.map(t => String(t.rest_id))).toEqual(['101', '102'])
+  expect(parsed.unavailable).toBe(0)
+  expect(parsed.bottomCursor).toBe('bottom-value')
+  expect(parsed.errors).toEqual([])
 })
+
+it('书签响应中的墓碑与不可用条目只计数不入队，错误被收集', () => {
+  const payload = bookmarksPayload([
+    bookmarkEntry('201'),
+    bookmarkEntry('tomb', { __typename: 'TweetTombstone', tombstone: { text: { text: '不可用' } } }),
+    bookmarkEntry('gone', { __typename: 'TweetUnavailable' }),
+    bookmarkEntry('bad', { __typename: 'Tweet', rest_id: 'x', legacy: {} })
+  ], { errors: [{ message: '合成接口错误', code: 88 }] })
+  const parsed = bookmarkEntries(payload)
+  expect(parsed.found).toBe(true)
+  expect(parsed.tweets.map(t => String(t.rest_id))).toEqual(['201'])
+  expect(parsed.unavailable).toBe(3)
+  expect(parsed.errors).toEqual(['合成接口错误'])
+})
+
+it('缺少书签时间线时返回 found=false，仅有游标视为到底', () => {
+  expect(bookmarkEntries({}).found).toBe(false)
+  expect(bookmarkEntries({ data: { other: {} } }).found).toBe(false)
+  const empty = bookmarkEntries(bookmarksPayload([bookmarkCursor('Top'), bookmarkCursor('Bottom', 'tail')]))
+  expect(empty.found).toBe(true)
+  expect(empty.tweets).toEqual([])
+  expect(empty.unavailable).toBe(0)
+  expect(empty.bottomCursor).toBe('tail')
+  const captured = captureFromPayload(bookmarkEntries(bookmarksPayload([bookmarkEntry('301')])).tweets[0], '301')!
+  expect(captured.post.id).toBe('301')
+  expect(captured.post.partial).toBe(false)
+})
+
+it('长文视频与 GIF 媒体只保留封面并提示未下载，不标记不完整', () => {
+  const article = {
+    title: '含视频长文',
+    content_state: {
+      entityMap: [
+        { key: '0', value: { type: 'MEDIA', mutability: 'IMMUTABLE', data: { mediaItems: [{ mediaId: 'v1' }] } } },
+        { key: '1', value: { type: 'MEDIA', mutability: 'IMMUTABLE', data: { mediaItems: [{ mediaId: 'g1' }] } } }
+      ],
+      blocks: [
+        block('p', 'unstyled', '正文段落'),
+        block('v', 'atomic', ' ', { entityRanges: [{ key: 0, offset: 0, length: 1 }] }),
+        block('g', 'atomic', ' ', { entityRanges: [{ key: 1, offset: 0, length: 1 }] })
+      ]
+    },
+    media_entities: [
+      { media_id: 'v1', media_key: 'kv', media_info: { __typename: 'ApiVideo', preview_image: { original_img_url: 'https://pbs.twimg.com/amplify_video_thumb/1/img/v.jpg' }, duration_millis: 9000, variants: [{ bitrate: 832000, content_type: 'video/mp4', url: 'https://video.twimg.com/amplify_video/1/v.mp4' }] } },
+      { media_id: 'g1', media_key: 'kg', media_info: { __typename: 'ApiGif', preview_image: { original_img_url: 'https://pbs.twimg.com/tweet_video_thumb/g.jpg' }, variants: [{ bitrate: 0, content_type: 'video/mp4', url: 'https://video.twimg.com/tweet_video/g.mp4' }] } }
+    ]
+  }
+  const result = articleFromContentState(article)!
+  expect(result.markdown).toContain('![X 视频封面](https://pbs.twimg.com/amplify_video_thumb/1/img/v.jpg)')
+  expect(result.markdown).toContain('![X 视频封面](https://pbs.twimg.com/tweet_video_thumb/g.jpg)')
+  expect(result.markdown.match(/视频未下载，仅保留封面/g)).toHaveLength(2)
+  expect(result.markdown).not.toContain('video.twimg.com')
+  expect(result.markdown).not.toContain('.mp4')
+  expect(result.images).toEqual(expect.arrayContaining([
+    'https://pbs.twimg.com/amplify_video_thumb/1/img/v.jpg',
+    'https://pbs.twimg.com/tweet_video_thumb/g.jpg'
+  ]))
+  expect(result.images.every(u => !u.includes('video.twimg.com'))).toBe(true)
+  expect(result.partialReasons).toEqual([])
+  const captured = captureFromPayload({ ...tweet(), article: { article_results: { result: article } } }, '123')!
+  expect(captured.post.partial).toBe(false)
+})
+
+it('无法映射的媒体仍记 media-unresolved，TWEMOJI 实体不产生标记', () => {
+  const article = {
+    title: '表情',
+    content_state: {
+      entityMap: [
+        { key: '0', value: { type: 'MEDIA', mutability: 'IMMUTABLE', data: { mediaItems: [{ mediaId: 'gone' }] } } },
+        { key: '5', value: { type: 'TWEMOJI', mutability: 'IMMUTABLE', data: { emoji: '😀', url: 'https://abs.twimg.com/emoji/v2/svg/1f600.svg' } } }
+      ],
+      blocks: [
+        block('p', 'unstyled', '带表情 😀 的正文', { entityRanges: [{ key: 5, offset: 4, length: 2 }] }),
+        block('m', 'atomic', ' ', { entityRanges: [{ key: 0, offset: 0, length: 1 }] })
+      ]
+    },
+    media_entities: []
+  }
+  const result = articleFromContentState(article)!
+  expect(result.markdown).toContain('带表情 😀 的正文')
+  expect(result.markdown).not.toContain('abs.twimg.com')
+  expect(result.partialReasons).toEqual(['media-unresolved'])
+})
+
+it('LINK 实体为 t.co 且锚文本是 https 链接时改用锚文本地址', () => {
+  const real = 'https://sg.starryblu.com/x/demo'
+  const make = (text: string, url: string) => ({
+    title: '链接',
+    content_state: {
+      entityMap: [{ key: '0', value: { type: 'LINK', mutability: 'MUTABLE', data: { url } } }],
+      blocks: [block('p', 'unstyled', text, { entityRanges: [{ key: 0, offset: 2, length: text.indexOf(' ', 2) - 2 }] })]
+    }
+  })
+  const resolved = articleFromContentState(make(`见 ${real} 详情`, 'https://t.co/hB4Z0adyUC'))!
+  expect(resolved.markdown).toContain(`[${real}](${real})`)
+  expect(resolved.markdown).not.toContain('t.co')
+  const plain = articleFromContentState(make('见 短链接 详情', 'https://t.co/hB4Z0adyUC'))!
+  expect(plain.markdown).toContain('[短链接](https://t.co/hB4Z0adyUC)')
+})
+
+

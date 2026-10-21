@@ -62,10 +62,11 @@ export class GithubSync {
     const stateFile = path.join(this.library.root, 'local', `sync-${hash(repo+branch).slice(0,16)}.json`)
     let authenticatedAs = ''
     const updateStatus = (message: string) => { this.status = message; this.changed() }
-    const api = async (endpoint: string, method = 'GET', body?: unknown): Promise<any> => {
+    const api = async (endpoint: string, method = 'GET', body?: unknown, tolerated?: number): Promise<any> => {
       const stage = !endpoint ? '读取仓库' : endpoint.startsWith('git/ref/heads/') ? `读取分支 ${branch}` : method !== 'GET' ? (endpoint.startsWith('git/refs/') ? '更新远端分支' : '写入远端内容') : endpoint.startsWith('git/trees/') ? '读取远端目录' : endpoint.startsWith('git/blobs/') ? '读取远端文件' : '读取远端提交'
       const { response, data } = await githubJson(this.request, `https://api.github.com/repos/${repo}${endpoint ? `/${endpoint}` : ''}`, { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'error' }, stage, updateStatus)
       if (!response.ok) {
+        if (response.status === tolerated) return { rejected: response.status }
         const reason = response.status === 401 ? 'GitHub 未接受此 Token，可能已失效、被撤销或复制不完整。请重新生成并粘贴完整新值，再检查连接；修改分支或 Contents 权限不能修复认证失败'
           : response.status === 404 && !endpoint ? `${authenticatedAs ? `Token 已认证为 @${authenticatedAs}，但` : ''}仓库 ${repo} 不可访问。细粒度 Token 请核对 Resource owner 为 ${repo.split('/')[0]}、Repository access 已选中 ${repo.split('/')[1]}，并确认授权已批准；同步还需 Contents: Read and write`
           : response.status === 404 && endpoint.startsWith('git/ref/heads/') ? '仓库可访问，但无法读取此分支；请检查分支是否存在及 Token 的 Contents 权限'
@@ -87,110 +88,135 @@ export class GithubSync {
       this.status = '校验私有仓库…'; this.changed()
       const meta = await api('')
       if (meta.private !== true) throw new Error('数据仓库必须为 private，已停止同步')
-      const head = await api(`git/ref/heads/${branch}`)
       if (checkOnly) {
+        const head = await api(`git/ref/heads/${branch}`)
         this.status = `连接检查通过${authenticatedAs ? `（@${authenticatedAs}）` : ''}：可读取私库 ${repo} 的 ${branch} 分支。未上传内容；写入仍需 Contents: Read and write 权限`
         return
       }
-      const state: { hashes: Record<string,string> } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : { hashes: {} }
-      const commit = await api(`git/commits/${head.object.sha}`)
-      const tree = await api(`git/trees/${commit.tree.sha}?recursive=1`)
-      if (tree.truncated) throw new Error('远端目录过大，本次未读取完整，停止同步')
-      const remote = new Map<string, Buffer>()
+      const state: { hashes: Record<string,string>; time?: string; lastRemoteSha?: string; lastTreeSha?: string } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : { hashes: {} }
       const cache = new SyncCache(this.library.root, hash(JSON.stringify([repo, branch])).slice(0, 24))
-      let downloaded = 0, reused = 0, cached = 0
-      const entries = tree.tree.filter((e: any) => syncAllowed(e.path))
-      for (const e of entries) {
-        if (e.mode !== '100644' || e.type !== 'blob' || e.size > 20*1024*1024) throw new Error('远端包含不支持的对象或超限文件')
-        const target = safePath(this.library.root, e.path)
-        if (typeof e.sha !== 'string' || !/^[\w-]+$/.test(e.sha)) throw new Error('远端文件标识无效')
-        const local = existsSync(target) ? readFileSync(target) : undefined
-        if (local && gitBlobHash(local) === e.sha) {
-          remote.set(e.path, local); reused++; cache.put(local); continue
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const head = await api(`git/ref/heads/${branch}`)
+        const remoteChanged = state.lastRemoteSha !== head.object.sha || !state.lastTreeSha
+        const merged = new Map<string, Buffer>()
+        let baseline = state.hashes
+        let baseTreeSha = state.lastTreeSha || ''
+        let pulled = 0, downloaded = 0, reused = 0, cached = 0, metadataConflicts = 0
+        if (remoteChanged) {
+          const commit = await api(`git/commits/${head.object.sha}`)
+          const tree = await api(`git/trees/${commit.tree.sha}?recursive=1`)
+          if (tree.truncated) throw new Error('远端目录过大，本次未读取完整，停止同步')
+          const remote = new Map<string, Buffer>()
+          const entries = tree.tree.filter((e: any) => syncAllowed(e.path))
+          for (const e of entries) {
+            if (e.mode !== '100644' || e.type !== 'blob' || e.size > 20*1024*1024) throw new Error('远端包含不支持的对象或超限文件')
+            const target = safePath(this.library.root, e.path)
+            if (typeof e.sha !== 'string' || !/^[\w-]+$/.test(e.sha)) throw new Error('远端文件标识无效')
+            const local = existsSync(target) ? readFileSync(target) : undefined
+            if (local && gitBlobHash(local) === e.sha) {
+              remote.set(e.path, local); reused++; cache.put(local); continue
+            }
+            const saved = cache.read(e.sha)
+            if (saved) { remote.set(e.path, saved); cached++; continue }
+            const blob = await api(`git/blobs/${e.sha}`)
+            if (blob.encoding !== 'base64') throw new Error('远端文件编码不支持')
+            const content = Buffer.from(blob.content, 'base64')
+            if (content.length > 20 * 1024 * 1024) throw new Error('远端文件超出大小限制')
+            if (/^[a-f0-9]{40}$/.test(e.sha) && gitBlobHash(content) !== e.sha) throw new Error('远端文件完整性校验失败，已停止同步')
+            remote.set(e.path, content); downloaded++; cache.put(content)
+          }
+          const remoteManifest = remote.get('manifest.json')
+          if (remoteManifest && JSON.parse(remoteManifest.toString()).schemaVersion !== 1) throw new Error('远端资料库版本不兼容')
+          if (this.editorDirty()) throw new Error('检测到正在编辑的未保存内容，本轮同步已延后；保存完成后可重新同步')
+          this.status = '比较本地与远端内容…'; this.changed()
+          this.library.refresh()
+          for (const [file, content] of remote) merged.set(file, content)
+          const paths = new Set([...remote.keys(), ...walk(this.library.root).filter(syncAllowed)])
+          for (const file of paths) {
+            const target = safePath(this.library.root, file)
+            const local = existsSync(target) ? readFileSync(target) : undefined
+            const theirs = remote.get(file)
+            // Missing files are not deletion commands. Tombstones are the only portable deletion signal.
+            if (!local && theirs) { atomic(target, theirs); pulled++; continue }
+            if (local && !theirs) { merged.set(file, local); continue }
+            if (!local || !theirs) continue
+            const choice = mergeChoice(state.hashes[file], hash(local), hash(theirs))
+            if (choice === 'local' || choice === 'same') merged.set(file, local)
+            else if (choice === 'remote') { atomic(target, theirs); pulled++ }
+            else if (file.endsWith('.md')) {
+              if (equivalentMarkdown(local.toString(), theirs.toString())) { merged.set(file, local); continue }
+              const completionMerged = mergeCompletionTimeOnly(local.toString(), theirs.toString())
+              if (completionMerged !== undefined) {
+                const content = Buffer.from(completionMerged)
+                merged.set(file, content)
+                if (!content.equals(local)) { atomic(target, content); pulled++ }
+                continue
+              }
+              const current = [...this.library.notes.values()].find(n => n.path === file)
+              if (!current) throw new Error('无法关联冲突正文，已保留文件并停止')
+              const parsed = decode(theirs.toString())
+              const incoming: Note = { ...current, body: parsed.body, title: String(parsed.metadata.title || current.title), hash: hash(theirs), updatedAt: String(parsed.metadata.updatedAt || '远端版本') }
+              if (current.kind === 'topic') {
+                incoming.completed = parsed.metadata.completed === true
+                incoming.completedAt = incoming.completed && typeof parsed.metadata.completedAt === 'string' ? parsed.metadata.completedAt : undefined
+              }
+              this.library.addConflict(current, incoming, { currentRaw: local.toString(), incomingRaw: theirs.toString() })
+              merged.set(file, local)
+            } else if (file.startsWith('assets/')) {
+              throw new Error('同名图片内容不同，停止同步以避免覆盖；请重命名其中一份')
+            } else if (file !== 'manifest.json') {
+              // Preserve both metadata variants without aborting the whole sync. The local variant is
+              // uploaded as the shared baseline, while the remote variant remains recoverable locally.
+              const recovery = path.join(this.library.root, 'local', `sync-conflict-${hash(file).slice(0,16)}.json`)
+              atomic(recovery, JSON.stringify({ path: file, local: local.toString('base64'), remote: theirs.toString('base64') }))
+              merged.set(file, local)
+              metadataConflicts++
+            }
+          }
+          for (const file of walk(this.library.root, 'conflicts').filter(syncAllowed)) merged.set(file, readFileSync(safePath(this.library.root, file)))
+          baseline = Object.fromEntries([...remote].map(([file, content]) => [file, hash(content)]))
+          baseTreeSha = commit.tree.sha
+        } else {
+          if (this.editorDirty()) throw new Error('检测到正在编辑的未保存内容，本轮同步已延后；保存完成后可重新同步')
+          this.library.refresh()
+          for (const file of walk(this.library.root).filter(syncAllowed)) merged.set(file, readFileSync(safePath(this.library.root, file)))
         }
-        const saved = cache.read(e.sha)
-        if (saved) { remote.set(e.path, saved); cached++; continue }
-        const blob = await api(`git/blobs/${e.sha}`)
-        if (blob.encoding !== 'base64') throw new Error('远端文件编码不支持')
-        const content = Buffer.from(blob.content, 'base64')
-        if (content.length > 20 * 1024 * 1024) throw new Error('远端文件超出大小限制')
-        if (/^[a-f0-9]{40}$/.test(e.sha) && gitBlobHash(content) !== e.sha) throw new Error('远端文件完整性校验失败，已停止同步')
-        remote.set(e.path, content); downloaded++; cache.put(content)
-      }
-      const remoteManifest = remote.get('manifest.json')
-      if (remoteManifest && JSON.parse(remoteManifest.toString()).schemaVersion !== 1) throw new Error('远端资料库版本不兼容')
-      if (this.editorDirty()) throw new Error('检测到正在编辑的未保存内容，本轮同步已延后；保存完成后可重新同步')
-      this.status = '比较本地与远端内容…'; this.changed()
-      this.library.refresh()
-      const merged = new Map<string, Buffer>(remote)
-      const paths = new Set([...remote.keys(), ...walk(this.library.root).filter(syncAllowed)])
-      let metadataConflicts = 0
-      for (const file of paths) {
-        const target = safePath(this.library.root, file)
-        const local = existsSync(target) ? readFileSync(target) : undefined
-        const theirs = remote.get(file)
-        // Missing files are not deletion commands. Tombstones are the only portable deletion signal.
-        if (!local && theirs) { atomic(target, theirs); continue }
-        if (local && !theirs) { merged.set(file, local); continue }
-        if (!local || !theirs) continue
-        const choice = mergeChoice(state.hashes[file], hash(local), hash(theirs))
-        if (choice === 'local' || choice === 'same') merged.set(file, local)
-        else if (choice === 'remote') atomic(target, theirs)
-        else if (file.endsWith('.md')) {
-          if (equivalentMarkdown(local.toString(), theirs.toString())) { merged.set(file, local); continue }
-          const completionMerged = mergeCompletionTimeOnly(local.toString(), theirs.toString())
-          if (completionMerged !== undefined) {
-            const content = Buffer.from(completionMerged)
-            merged.set(file, content)
-            if (!content.equals(local)) atomic(target, content)
+        const changes: any[] = []
+        const uploadedHashes: Record<string, string> = {}
+        let bytes = 0
+        for (const [file, content] of merged) {
+          if (baseline[file] === hash(content)) continue
+          if (content.length > 20*1024*1024) throw new Error('文件超过单文件同步限制，仍保留本地')
+          bytes += content.length
+          if (bytes > 100*1024*1024) throw new Error('本轮变化超过 100 MiB，尚未提交远端；需要分批同步支持')
+          this.status = `上传 ${file.startsWith('assets/') ? '图片' : '内容'}…`; this.changed()
+          const blob = await api('git/blobs', 'POST', { content: content.toString('base64'), encoding: 'base64' })
+          cache.put(content)
+          changes.push({ path: file, mode: '100644', type: 'blob', sha: blob.sha })
+          uploadedHashes[file] = hash(content)
+        }
+        let headSha = head.object.sha, treeSha = baseTreeSha
+        if (changes.length) {
+          const newTree = await api('git/trees', 'POST', { base_tree: baseTreeSha, tree: changes })
+          const newCommit = await api('git/commits', 'POST', { message: 'Sync XMemeory library', tree: newTree.sha, parents: [head.object.sha] })
+          // No force: concurrent remote writes reject this update rather than overwrite data.
+          const refUpdate = await api(`git/refs/heads/${branch}`, 'PATCH', { sha: newCommit.sha, force: false }, 422)
+          if (refUpdate?.rejected === 422) {
+            if (attempt === 3) throw new Error('远端持续变化，本地内容已保留，请稍后重试')
+            if (remoteChanged) state.hashes = { ...state.hashes, ...baseline }
             continue
           }
-          const current = [...this.library.notes.values()].find(n => n.path === file)
-          if (!current) throw new Error('无法关联冲突正文，已保留文件并停止')
-          const parsed = decode(theirs.toString())
-          const incoming: Note = { ...current, body: parsed.body, title: String(parsed.metadata.title || current.title), hash: hash(theirs), updatedAt: String(parsed.metadata.updatedAt || '远端版本') }
-          if (current.kind === 'topic') {
-            incoming.completed = parsed.metadata.completed === true
-            incoming.completedAt = incoming.completed && typeof parsed.metadata.completedAt === 'string' ? parsed.metadata.completedAt : undefined
-          }
-          this.library.addConflict(current, incoming, { currentRaw: local.toString(), incomingRaw: theirs.toString() })
-          merged.set(file, local)
-        } else if (file.startsWith('assets/')) {
-          throw new Error('同名图片内容不同，停止同步以避免覆盖；请重命名其中一份')
-        } else if (file !== 'manifest.json') {
-          // Preserve both metadata variants without aborting the whole sync. The local variant is
-          // uploaded as the shared baseline, while the remote variant remains recoverable locally.
-          const recovery = path.join(this.library.root, 'local', `sync-conflict-${hash(file).slice(0,16)}.json`)
-          atomic(recovery, JSON.stringify({ path: file, local: local.toString('base64'), remote: theirs.toString('base64') }))
-          merged.set(file, local)
-          metadataConflicts++
+          headSha = newCommit.sha; treeSha = newTree.sha
         }
+        atomic(stateFile, JSON.stringify({ hashes: remoteChanged ? mergedHashes(merged) : { ...state.hashes, ...uploadedHashes }, lastRemoteSha: headSha, lastTreeSha: treeSha, time: new Date().toISOString() }))
+        if (remoteChanged) cache.prune(new Set([...merged.values()].map(gitBlobHash)))
+        this.library.refresh()
+        const pending = this.library.conflicts.size
+        this.status = `${remoteChanged ? `已拉取 ${pulled} 项远端更新` : '远端无更新'} · 已上传 ${changes.length} 项`
+        if (pending || metadataConflicts) this.status += `，${pending} 项正文冲突待处理${metadataConflicts ? `，${metadataConflicts} 项元数据差异已保留恢复记录` : ''}`
+        if (remoteChanged) this.status += ` · 下载 ${downloaded} · 复用本地 ${reused} · 缓存命中 ${cached}`
+        return
       }
-      for (const file of walk(this.library.root, 'conflicts').filter(syncAllowed)) merged.set(file, readFileSync(safePath(this.library.root, file)))
-      const changes: any[] = []
-      let bytes = 0
-      for (const [file, content] of merged) {
-        if (remote.has(file) && hash(remote.get(file)!) === hash(content)) continue
-        if (content.length > 20*1024*1024) throw new Error('文件超过单文件同步限制，仍保留本地')
-        bytes += content.length
-        if (bytes > 100*1024*1024) throw new Error('本轮变化超过 100 MiB，尚未提交远端；需要分批同步支持')
-        this.status = `上传 ${file.startsWith('assets/') ? '图片' : '内容'}…`; this.changed()
-        const blob = await api('git/blobs', 'POST', { content: content.toString('base64'), encoding: 'base64' })
-        cache.put(content)
-        changes.push({ path: file, mode: '100644', type: 'blob', sha: blob.sha })
-      }
-      if (changes.length) {
-        const newTree = await api('git/trees', 'POST', { base_tree: commit.tree.sha, tree: changes })
-        const newCommit = await api('git/commits', 'POST', { message: 'Sync XMemeory library', tree: newTree.sha, parents: [head.object.sha] })
-        // No force: concurrent remote writes reject this update rather than overwrite data.
-        await api(`git/refs/heads/${branch}`, 'PATCH', { sha: newCommit.sha, force: false })
-      }
-      atomic(stateFile, JSON.stringify({ hashes: mergedHashes(merged), time: new Date().toISOString() }))
-      cache.prune(new Set([...merged.values()].map(gitBlobHash)))
-      this.library.refresh()
-      const pending = this.library.conflicts.size
-      this.status = pending || metadataConflicts ? `内容已同步，${pending} 项正文冲突待处理${metadataConflicts ? `，${metadataConflicts} 项元数据差异已保留恢复记录` : ''}` : `已同步 · ${new Date().toLocaleTimeString('zh-CN')}`
-      this.status += ` · 下载 ${downloaded} · 复用本地 ${reused} · 缓存命中 ${cached}`
     } catch (e) { this.status = e instanceof Error ? e.message : '同步失败'; throw e }
     finally { this.running = false; this.changed() }
   }

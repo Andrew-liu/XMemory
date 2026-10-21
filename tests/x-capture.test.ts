@@ -1,7 +1,13 @@
 import { expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
+import path from 'node:path'
 import type { BrowserContext } from 'playwright'
-import { chromeArgs, downloadChromeImage, X_LOGIN_URL } from '../src/main/x-capture'
+import { chromeArgs, downloadChromeImage, XCapture, X_LOGIN_URL } from '../src/main/x-capture'
 import { articleDomMarkdown, captureFromPayload, mergeArticleDomBlocks, updatedCaptureBody } from '../src/main/x-parse'
+import { Library } from '../src/main/library'
+
+const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/tests')
+mkdirSync(temporary, { recursive: true })
 
 it('图片通过 Chrome 标签页响应读取并关闭标签页，失败不会报告成功', async () => {
   const url = 'https://pbs.twimg.com/media/test.jpg'
@@ -160,4 +166,67 @@ it('Article 缺少 content_state 时必须标记不完整并回退 DOM', () => {
   expect(captured.articleResult).toBeUndefined()
   expect(captured.structured.partialReasons).toContain('content-state-missing')
   expect(captured.markdown).toContain('正文可能不完整')
+})
+
+it('批量与单条共用落盘输出一致，capture.json 标记书签来源', async () => {
+  const rootA = mkdtempSync(path.join(temporary, 'single-'))
+  const rootB = mkdtempSync(path.join(temporary, 'batch-'))
+  const libA = new Library(rootA)
+  const libB = new Library(rootB)
+  try {
+    const capA = new XCapture(libA, mkdtempSync(path.join(temporary, 'ua-')), () => {})
+    const capB = new XCapture(libB, mkdtempSync(path.join(temporary, 'ub-')), () => {})
+    const make = () => captureFromPayload({ rest_id: '123', legacy: { full_text: '共用落盘的合成正文', truncated: false, entities: { urls: [] } }, core: { user_results: { result: { legacy: { screen_name: 'user1' } } } } }, '123')!
+    const single = await (capA as any).persistCaptured(make(), '42')
+    const batch = await (capB as any).persistCaptured(make(), '42', 'bookmarks')
+    expect(single.result).toBe('created')
+    expect(batch.result).toBe('created')
+    expect(libB.get(batch.noteId).body).toBe(libA.get(single.noteId).body)
+    const jsonA = JSON.parse(readFileSync(path.join(rootA, 'metadata', 'x-42-123.capture.json'), 'utf8'))
+    const jsonB = JSON.parse(readFileSync(path.join(rootB, 'metadata', 'x-42-123.capture.json'), 'utf8'))
+    expect(jsonA.discoveredVia).toBeUndefined()
+    expect(jsonB.discoveredVia).toBe('bookmarks')
+    expect({ ...jsonB, discoveredVia: undefined, capturedAt: undefined }).toEqual({ ...jsonA, capturedAt: undefined })
+  } finally {
+    await libA.close()
+    await libB.close()
+  }
+})
+
+it('不完整旧正文被更短但完整的新正文替换，已编辑或带笔记时不覆盖', () => {
+  const remote = '# X 原文\n\n完整正文\n\n# 我的笔记\n'
+  const stale = remote.replace('# 我的笔记', '> 正文可能不完整，尚未取得可核验的完整结构。\n\n# 我的笔记')
+  expect(remote.length).toBeLessThan(stale.length)
+  expect(updatedCaptureBody({ body: stale, partial: true }, remote, remote, {}, false)).toBe(remote)
+  expect(updatedCaptureBody({ body: stale, partial: true, userEdited: true }, remote, remote, {}, false)).toBe(stale)
+  expect(updatedCaptureBody({ body: stale + '\n我的补充', partial: true }, remote, remote, {}, false)).toBe(stale + '\n我的补充')
+  expect(updatedCaptureBody({ body: stale, partial: false }, remote, remote, {}, false)).toBe(stale)
+  expect(updatedCaptureBody({ body: stale, partial: true }, remote, remote, {}, true)).toBe(stale)
+})
+
+it('重采完整长文替换旧的不完整正文并更新 partial，用户编辑后保持原文与标记', async () => {
+  const root = mkdtempSync(path.join(temporary, 'upgrade-'))
+  const lib = new Library(root)
+  try {
+    const cap = new XCapture(lib, mkdtempSync(path.join(temporary, 'uu-')), () => {})
+    const complete = captureFromPayload({ rest_id: '123', legacy: { full_text: '完整正文', truncated: false, entities: { urls: [] } }, core: { user_results: { result: { legacy: { screen_name: 'user1' } } } } }, '123')!
+    const stale = { ...complete, markdown: complete.markdown.replace('# 我的笔记', '> 正文可能不完整，尚未取得可核验的完整结构。\n\n# 我的笔记'), post: { ...complete.post, partial: true } }
+    const first = await (cap as any).persistCaptured(stale, '42')
+    expect(first.result).toBe('created')
+    expect(lib.get(first.noteId).partial).toBe(true)
+    const staleLength = lib.get(first.noteId).body.length
+    expect(complete.markdown.length).toBeLessThan(staleLength)
+    const second = await (cap as any).persistCaptured(complete, '42')
+    expect(second.result).toBe('updated')
+    const upgraded = lib.get(second.noteId)
+    expect(upgraded.partial).toBe(false)
+    expect(upgraded.body).not.toContain('正文可能不完整')
+    const edited = lib.save({ ...upgraded, body: upgraded.body + '\n用户批注', userEdited: true, partial: true }, upgraded.hash)
+    expect((await (cap as any).persistCaptured(complete, '42')).result).toBe('unchanged')
+    const kept = lib.get(edited.id)
+    expect(kept.body).toContain('用户批注')
+    expect(kept.partial).toBe(true)
+  } finally {
+    await lib.close()
+  }
 })

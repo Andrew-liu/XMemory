@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { Library, safePath } from '../src/main/library'
+import { Library, atomic, hash, safePath, walk } from '../src/main/library'
 import { GithubSync, githubTokenKind, mergeChoice, mergedHashes, normalizeGithubToken, normalizeRepository, runConfiguredStartupSync, syncAllowed } from '../src/main/sync'
 import { prepareMarkdown } from '../src/renderer/markdown'
 import { splitDifference, splitMatches } from '../src/renderer/highlight'
@@ -109,7 +109,7 @@ it('私库同步完整链路使用正确仓库地址并非强制更新 master', 
     return Response.json({ sha: endpoint === 'git/commits' ? 'new-commit' : 'new-object' })
   })
   await sync.run('https://github.com/example/synthetic.git', 'master', 'github_pat_syntheticTokenForTests')
-  expect(sync.status).toContain('已同步')
+  expect(sync.status).toContain('已上传')
   expect(sync.running).toBe(false)
   expect(writes.find(item => item.endpoint === 'git/trees')?.body.tree.some((item: any) => item.path === 'manifest.json')).toBe(true)
   expect(writes.at(-1)).toEqual({ endpoint: 'git/refs/heads/master', body: { sha: 'new-commit', force: false } })
@@ -144,6 +144,163 @@ it('检查连接只读取私库和分支，不上传内容或改写同步状态�
   expect(sync.status).toContain('@synthetic-user')
   expect(sync.status).toContain('未上传内容')
   expect(readdirSync(path.join(l.root, 'local')).sort()).toEqual(before)
+})
+const syncRoot = 'https://api.github.com/repos/example/synthetic'
+const syncStateFile = (l: Library) => path.join(l.root, 'local', `sync-${hash('example/syntheticmaster').slice(0,16)}.json`)
+it('远端无更新时跳过远端目录读取，仅上传本地变化', async () => {
+  const l = library()
+  l.save({ kind: 'inspiration', title: '本地新增', body: '本地内容' })
+  const manifestHash = hash(readFileSync(path.join(l.root, 'manifest.json')))
+  atomic(syncStateFile(l), JSON.stringify({ hashes: { 'manifest.json': manifestHash }, lastRemoteSha: 'head-1', lastTreeSha: 'tree-1' }))
+  const calls: string[] = []
+  const uploads: string[] = []
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    const url = String(input); calls.push(`${init?.method || 'GET'} ${url}`)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: 'head-1' } })
+    if (init?.method === 'POST' && url.endsWith('git/blobs')) uploads.push(Buffer.from(JSON.parse(String(init.body)).content, 'base64').toString())
+    if (init?.method === 'POST') return Response.json({ sha: 'new-commit' })
+    if (init?.method === 'PATCH') return Response.json({ object: { sha: 'head-1' } })
+    return new Response('{}', { status: 404 })
+  })
+  await sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')
+  expect(calls.filter(c => c.startsWith('GET') && /git\/(trees|blobs)\//.test(c))).toEqual([])
+  expect(calls.some(c => c.startsWith('PATCH'))).toBe(true)
+  expect(uploads.join('\n')).toContain('本地新增')
+  expect(sync.status).toContain('远端无更新')
+  expect(sync.status).toContain('已上传 2 项')
+  const state = JSON.parse(readFileSync(syncStateFile(l), 'utf8'))
+  expect(state.lastRemoteSha).toBe('new-commit')
+})
+it('远端有更新时先写入本地再上传，远端变化不重复回传', async () => {
+  const l = library()
+  l.save({ kind: 'inspiration', title: '本地保留', body: '本地内容' })
+  const remoteContent = Buffer.from('---\nxmemeory_id: remote-note\ntype: inspiration\ntitle: 远端新增\n---\n远端正文')
+  const uploads: string[] = []
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    const url = String(input)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: 'head-2' } })
+    if (url.endsWith('git/commits/head-2')) return Response.json({ tree: { sha: 'tree-2' } })
+    if (url.endsWith('git/trees/tree-2?recursive=1')) return Response.json({ tree: [{ path: 'inspirations/remote-note.md', mode: '100644', type: 'blob', size: remoteContent.length, sha: 'remote-blob' }], truncated: false })
+    if (url.endsWith('git/blobs/remote-blob')) return Response.json({ encoding: 'base64', content: remoteContent.toString('base64') })
+    if (init?.method === 'POST' && url.endsWith('git/blobs')) uploads.push(Buffer.from(JSON.parse(String(init.body)).content, 'base64').toString())
+    if (init?.method === 'POST') return Response.json({ sha: 'new-commit' })
+    if (init?.method === 'PATCH') return Response.json({ object: { sha: 'new-commit' } })
+    return new Response('{}', { status: 404 })
+  })
+  await sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')
+  expect(readFileSync(path.join(l.root, 'inspirations/remote-note.md'), 'utf8')).toContain('远端正文')
+  expect(uploads.some(content => content.includes('远端正文'))).toBe(false)
+  expect(uploads.some(content => content.includes('本地保留'))).toBe(true)
+  expect(sync.status).toContain('已拉取 1 项远端更新')
+})
+it('本地无变化时不创建远端提交', async () => {
+  const l = library()
+  l.save({ kind: 'inspiration', title: '无变化', body: '内容' })
+  const hashes = Object.fromEntries(walk(l.root).filter(syncAllowed).map(f => [f, hash(readFileSync(safePath(l.root, f)))]))
+  atomic(syncStateFile(l), JSON.stringify({ hashes, lastRemoteSha: 'head-3', lastTreeSha: 'tree-3' }))
+  const calls: string[] = []
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    calls.push(`${init?.method || 'GET'} ${String(input)}`)
+    const url = String(input)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: 'head-3' } })
+    return new Response('{}', { status: 500 })
+  })
+  await sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')
+  expect(calls.filter(c => !c.startsWith('GET'))).toEqual([])
+  expect(sync.status).toContain('远端无更新')
+  expect(sync.status).toContain('已上传 0 项')
+})
+it('分支更新被 422 拒绝后重新拉取并成功', async () => {
+  const l = library()
+  l.save({ kind: 'inspiration', title: '本地内容', body: 'x' })
+  let head = 'head-1', patches = 0, refGets = 0
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    const url = String(input)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) { refGets++; return Response.json({ object: { sha: head } }) }
+    if (init?.method && init.method !== 'GET') {
+      if (init.method === 'PATCH') { patches++; if (patches === 1) { head = 'head-2'; return new Response('{}', { status: 422 }) } return Response.json({ object: { sha: head } }) }
+      return Response.json({ sha: `new-${head}` })
+    }
+    if (url.includes('git/commits/')) return Response.json({ tree: { sha: `tree-${head}` } })
+    if (url.includes('git/trees/')) return Response.json({ tree: [], truncated: false })
+    return new Response('{}', { status: 404 })
+  })
+  await sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')
+  expect(refGets).toBe(2)
+  expect(patches).toBe(2)
+  expect(JSON.parse(readFileSync(syncStateFile(l), 'utf8')).lastRemoteSha).toBe('new-head-2')
+})
+it('远端连续变化三次后报错，本地内容保留', async () => {
+  const l = library()
+  const note = l.save({ kind: 'inspiration', title: '保留', body: '本地内容' })
+  const before = readFileSync(path.join(l.root, note.path))
+  let head = 'head-1', patches = 0
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    const url = String(input)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: head } })
+    if (init?.method && init.method !== 'GET') {
+      if (init.method === 'PATCH') { patches++; head = `head-${patches + 1}`; return new Response('{}', { status: 422 }) }
+      return Response.json({ sha: 'new' })
+    }
+    if (url.includes('git/commits/')) return Response.json({ tree: { sha: `tree-${head}` } })
+    if (url.includes('git/trees/')) return Response.json({ tree: [], truncated: false })
+    return new Response('{}', { status: 404 })
+  })
+  await expect(sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')).rejects.toThrow('远端持续变化，本地内容已保留，请稍后重试')
+  expect(patches).toBe(3)
+  expect(readFileSync(path.join(l.root, note.path)).equals(before)).toBe(true)
+  expect(sync.running).toBe(false)
+})
+it('422 重试时以本轮远端为合并基线，连续远端改动不产生伪冲突', async () => {
+  const l = library()
+  const note = l.save({ kind: 'inspiration', title: '远端连续修改', body: '本地版' })
+  atomic(syncStateFile(l), JSON.stringify({ hashes: { [note.path]: hash(readFileSync(path.join(l.root, note.path))) } }))
+  const remote1 = Buffer.from(readFileSync(path.join(l.root, note.path)).toString().replace('本地版', '远端一版'))
+  const remote2 = Buffer.from(readFileSync(path.join(l.root, note.path)).toString().replace('本地版', '远端二版'))
+  let head = 'head-1', patches = 0
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    const url = String(input)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: head } })
+    if (url.endsWith(`git/commits/${head}`)) return Response.json({ tree: { sha: `tree-${head}` } })
+    if (url.includes('git/trees/')) return Response.json({ tree: [{ path: note.path, mode: '100644', type: 'blob', size: (head === 'head-1' ? remote1 : remote2).length, sha: `blob-${head}` }], truncated: false })
+    if (url.includes('git/blobs/blob-')) return Response.json({ encoding: 'base64', content: (head === 'head-1' ? remote1 : remote2).toString('base64') })
+    if (init?.method && init.method !== 'GET') {
+      if (init.method === 'PATCH') { patches++; if (patches === 1) { head = 'head-2'; return new Response('{}', { status: 422 }) } return Response.json({}) }
+      return Response.json({ sha: `new-${head}` })
+    }
+    return new Response('{}', { status: 404 })
+  })
+  await sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')
+  expect(patches).toBe(2)
+  expect(readFileSync(path.join(l.root, note.path), 'utf8')).toContain('远端二版')
+  l.refresh()
+  expect(l.conflicts.size).toBe(0)
+})
+it('缺少 lastRemoteSha 的旧状态文件走完整拉取路径', async () => {
+  const l = library()
+  l.save({ kind: 'inspiration', title: '旧状态', body: '内容' })
+  atomic(syncStateFile(l), JSON.stringify({ hashes: {}, time: '2026-01-01T00:00:00.000Z' }))
+  const calls: string[] = []
+  const sync = new GithubSync(l, () => {}, async (input, init) => {
+    calls.push(`${init?.method || 'GET'} ${String(input)}`)
+    const url = String(input)
+    if (url === syncRoot) return Response.json({ private: true })
+    if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: 'head-9' } })
+    if (url.endsWith('git/commits/head-9')) return Response.json({ tree: { sha: 'tree-9' } })
+    if (url.endsWith('git/trees/tree-9?recursive=1')) return Response.json({ tree: [], truncated: false })
+    if (init?.method === 'POST') return Response.json({ sha: 'new' })
+    if (init?.method === 'PATCH') return Response.json({})
+    return new Response('{}', { status: 404 })
+  })
+  await sync.run('example/synthetic', 'master', 'github_pat_syntheticTokenForTests')
+  expect(calls.some(c => c === `GET ${syncRoot}/git/trees/tree-9?recursive=1`)).toBe(true)
+  expect(JSON.parse(readFileSync(syncStateFile(l), 'utf8'))).toMatchObject({ lastRemoteSha: 'new', lastTreeSha: 'new' })
 })
 it('SQLite 索引损坏时保留副本并从 Markdown 自动重建', () => {
   const root = mkdtempSync(path.join(temporary, 'corrupt-index-'))

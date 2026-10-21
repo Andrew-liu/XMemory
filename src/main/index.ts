@@ -7,8 +7,7 @@ import { z } from 'zod'
 import { Library, atomic, safePath } from './library'
 import { GithubSync, githubTokenKind, normalizeGithubToken, normalizeRepository, runConfiguredStartupSync } from './sync'
 import { githubNetworkFetch } from './github-network'
-import { generate } from './ai'
-import { stripLegacyXSecrets, validateProviders } from './providers'
+import { pruneSecrets } from './providers'
 import type { Settings, Snapshot } from '../shared/types'
 import { validDate } from '../shared/calendar'
 import { XCapture } from './x-capture'
@@ -19,7 +18,6 @@ let tray: Tray | undefined
 let quitting = false
 let closing = false
 let rendererDirty = false
-let generation: Promise<void> | undefined
 async function flushWindow(recover = false) {
   if (!win || win.isDestroyed()) return
   await new Promise<void>((resolve, reject) => {
@@ -49,13 +47,19 @@ async function ensureSaved() {
 let library: Library
 let capture: XCapture
 let sync: GithubSync
-let controller: AbortController | undefined
 let settings: Settings
 let settingsFile: string
 let secretsFile: string
 let secrets: Record<string,string> = {}
 let tick: ReturnType<typeof setInterval>
-const defaults: Settings = { theme: 'system', providers: [{ id: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-flash' }], activeProvider: 'deepseek', closeToTray: true, branch: 'main' }
+const defaults: Settings = { theme: 'system', closeToTray: true, branch: 'main' }
+const loginItems: { available: boolean; get(): boolean; set(enabled: boolean): void } = process.env.XMEMEORY_TEST_DATA
+  ? (() => { let enabled = false; return { available: process.env.XMEMEORY_TEST_AUTOSTART !== 'unavailable', get: () => enabled, set: (value: boolean) => { enabled = value } } })()
+  : {
+      available: app.isPackaged,
+      get: () => app.getLoginItemSettings(process.platform === 'win32' ? { args: ['--hidden'] } : undefined).openAtLogin,
+      set: (enabled: boolean) => app.setLoginItemSettings(process.platform === 'win32' ? { openAtLogin: enabled, args: ['--hidden'] } : { openAtLogin: enabled })
+    }
 const changed = () => { if (win && !win.isDestroyed()) win.webContents.send('xm:changed') }
 const persist = () => atomic(settingsFile, JSON.stringify(settings))
 function saveSecrets(nextSecrets = secrets) {
@@ -68,15 +72,14 @@ function saveSecrets(nextSecrets = secrets) {
   secrets = nextSecrets
 }
 async function openLibrary(root: string) {
-  if (controller || sync?.running) throw new Error('请等待创作和同步结束后切换资料库')
+  if (sync?.running) throw new Error('请等待同步结束后切换资料库')
   const nextLibrary = new Library(root, changed)
   capture?.pause(); await library?.close()
   library = nextLibrary; library.start()
   capture = new XCapture(library, app.getPath('userData'), changed)
   sync = new GithubSync(library, changed, githubNetworkFetch, () => rendererDirty)
 }
-const providerSchema = z.object({ id: z.string().regex(/^[\w-]+$/), name: z.string().trim().min(1).max(80), baseURL: z.url().refine(s => { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password }), model: z.string().trim().min(1).max(150) })
-const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), providers: z.array(providerSchema).max(20).optional(), activeProvider: z.string().optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional() })
+const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional() })
 async function copyImageToClipboard(bytes: Buffer, richText = false) {
   const image = nativeImage.createFromBuffer(bytes)
   if (image.isEmpty()) throw new Error('图片无法读取')
@@ -95,7 +98,7 @@ async function dispatch(method: string, args: unknown[]) {
     atomic(path.join(app.getPath('userData'), 'recovery-notice.json'), JSON.stringify({ file }))
     return file
   }
-  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, settings: { ...settings, providers: settings.providers.map(p => ({ ...p, hasKey: !!secrets[p.id] })), hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github) }, status: library.errors.join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn } satisfies Snapshot
+  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, settings: { ...settings, hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github), openAtLogin: loginItems.get(), openAtLoginAvailable: loginItems.available }, status: library.errors.join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn, bookmarks: capture.bookmarksSummary() } satisfies Snapshot
   if (method === 'save') {
     const note = z.object({ id: z.string().optional(), kind: z.enum(['inspiration','memory','draft','topic']), title: z.string().max(400), body: z.string().max(4_000_000), tags: z.array(z.string()).max(50).optional(), groupId: z.string().optional(), parentId: z.string().optional(), scheduledDate: z.string().refine(validDate).optional(), completed: z.boolean().optional(), author: z.string().max(80).optional(), source: z.string().max(500).optional(), publishedAt: z.iso.datetime().optional(), sortOrder: z.number().int().min(0).optional(), partial: z.boolean().optional(), capturedImages: z.array(z.string().max(500)).max(40).optional() }).parse(args[0])
     return library.save(note, z.string().optional().parse(args[1]))
@@ -137,19 +140,10 @@ async function dispatch(method: string, args: unknown[]) {
     const next = settingsSchema.parse(args[0])
     if (next.repo?.trim()) next.repo = normalizeRepository(next.repo)
     if (next.branch !== undefined) next.branch = next.branch.trim()
-    const secret = z.object({ providerId: z.string().optional(), apiKey: z.string().max(4096).optional(), githubKey: z.string().max(4096).optional() }).optional().parse(args[1])
+    const secret = z.object({ githubKey: z.string().max(4096).optional() }).optional().parse(args[1])
     const nextSecrets = { ...secrets }
-    const modelChange = next.providers !== undefined || next.activeProvider !== undefined || secret?.providerId !== undefined || secret?.apiKey !== undefined
-    if (modelChange) {
-      if (controller) throw new Error('创作中不能修改模型配置，请先停止')
-      validateProviders(next.providers ?? settings.providers, next.activeProvider ?? settings.activeProvider, secret?.providerId)
-      if (secret?.apiKey !== undefined && !secret.providerId) throw new Error('保存 Key 时必须指定模型服务')
-    }
-    const removed = next.providers ? settings.providers.filter(p => !next.providers!.some(n => n.id === p.id)) : []
-    for (const p of removed) { if (!['github', 'cookies', 'xState', '__proto__', 'prototype', 'constructor'].includes(p.id)) delete nextSecrets[p.id] }
-    if (secret?.providerId && secret.apiKey?.trim()) nextSecrets[secret.providerId] = secret.apiKey.trim()
     if (secret?.githubKey !== undefined) nextSecrets.github = normalizeGithubToken(secret.githubKey)
-    if (secret || removed.length) saveSecrets(nextSecrets)
+    if (secret?.githubKey !== undefined) saveSecrets(nextSecrets)
     settings = { ...settings, ...next, ...(secret?.githubKey !== undefined ? { githubTokenSavedAt: new Date().toISOString() } : {}) }; persist()
     changed(); return
   }
@@ -158,22 +152,16 @@ async function dispatch(method: string, args: unknown[]) {
   if (method === 'showX') return capture.showWindow()
   if (method === 'disconnectX') return capture.disconnect()
   if (method === 'collectUrl') return capture.collectUrl(z.string().max(2000).parse(args[0]))
+  if (method === 'collectBookmarks') return capture.collectBookmarks(z.union([z.literal(20), z.literal(50), z.literal(100)]).parse(args[0]))
   if (method === 'pauseScan') return capture.pause()
   if (method === 'sync') return sync.run(settings.repo || '', settings.branch, secrets.github || '')
   if (method === 'checkSync') return sync.check(settings.repo || '', settings.branch, secrets.github || '')
-  if (method === 'cancel') { controller?.abort(); return }
-  if (method === 'generate') {
-    if (controller) throw new Error('已有创作正在进行，请先停止')
-    const [id, instruction, selected, mode, agentMode] = z.tuple([z.string(), z.string().max(8000), z.array(z.string()).max(30), z.enum(['short','thread']), z.enum(['local','web'])]).parse(args)
-    const origin = library.get(id)
-    if (origin.kind !== 'inspiration' || origin.deleted) throw new Error('请从未删除的灵感中开始创作')
-    validateProviders(settings.providers, settings.activeProvider)
-    const configured = settings.providers.find(p => p.id === settings.activeProvider)!
-    const provider = { ...configured }
-    if (!secrets[provider.id]?.trim() || !provider.model.trim()) throw new Error(`请先在设置中保存 ${provider.name} 的模型名称和 API Key`)
-    controller = new AbortController()
-    generation = generate(library, provider, secrets[provider.id] || '', id, instruction, selected, mode, agentMode, controller.signal, e => { if (!win.isDestroyed()) win.webContents.send('xm:run', e) }).catch(e => { if (!win.isDestroyed()) win.webContents.send('xm:run', { type: 'error', text: e?.name === 'AbortError' ? '已停止，已有内容已保存' : '生成失败，请检查服务配置、额度或网络；已有内容已保存。' }) }).finally(() => { controller = undefined; changed() })
-    return
+  if (method === 'setOpenAtLogin') {
+    const enabled = z.boolean().parse(args[0])
+    if (!loginItems.available) throw new Error('开机自启仅安装版可用')
+    loginItems.set(enabled)
+    if (loginItems.get() !== enabled) throw new Error('系统未接受开机自启设置，可能受权限或策略限制')
+    changed(); return
   }
   if (method === 'external') { const url = new URL(z.string().parse(args[0])); if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('仅允许网页链接'); return shell.openExternal(url.href) }
   throw new Error('不支持的操作')
@@ -188,10 +176,10 @@ app.whenReady().then(async () => {
   mkdirSync(app.getPath('userData'), { recursive: true })
   settingsFile = path.join(app.getPath('userData'), 'settings.json'); secretsFile = path.join(app.getPath('userData'), 'credentials.bin')
   const stored: Record<string, unknown> = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile,'utf8')) : {}
-  for (const legacy of ['scanMinutes', 'collect', 'cookieDirectory']) delete stored[legacy]
+  for (const legacy of ['scanMinutes', 'collect', 'cookieDirectory', 'providers', 'activeProvider']) delete stored[legacy]
   settings = { ...defaults, ...stored }
   if (existsSync(secretsFile)) { try { secrets = JSON.parse(safeStorage.decryptString(readFileSync(secretsFile))) } catch { secrets = {} } }
-  if (stripLegacyXSecrets(secrets)) { try { saveSecrets() } catch { /* Retry on the next launch. */ } }
+  if (pruneSecrets(secrets)) { try { saveSecrets() } catch { /* Retry on the next launch. */ } }
   if (!settings.legacyXCleanedAt) {
     try {
       await session.fromPartition('persist:xmemeory-x').clearStorageData()
@@ -203,7 +191,8 @@ app.whenReady().then(async () => {
   await openLibrary(existsSync(rootFile) ? JSON.parse(readFileSync(rootFile, 'utf8')) : path.join(app.getPath('userData'), 'library'))
   await capture.restore()
   persist()
-  win = new BrowserWindow({ width: 1360, height: 900, minWidth: 960, minHeight: 640, title: 'XMemeory', backgroundColor: '#f7f8fa', titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', webPreferences: { preload: path.join(dir, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  const startHidden = process.argv.includes('--hidden') || (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin)
+  win = new BrowserWindow({ width: 1360, height: 900, minWidth: 960, minHeight: 640, title: 'XMemeory', backgroundColor: '#f7f8fa', titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', show: !startHidden, webPreferences: { preload: path.join(dir, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', e => e.preventDefault())
   ipcMain.on('xm:dirty', (event, dirty) => { if (event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame && typeof dirty === 'boolean') rendererDirty = dirty })
@@ -214,7 +203,9 @@ app.whenReady().then(async () => {
   if (process.env.ELECTRON_RENDERER_URL) await win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else await win.loadFile(path.join(dir, '../renderer/index.html'))
   const recoveryNotice = path.join(app.getPath('userData'), 'recovery-notice.json')
-  if (existsSync(recoveryNotice)) void dialog.showMessageBox(win, { type: 'info', message: '发现此前另存的未保存正文', detail: `恢复副本目录：${path.join(app.getPath('userData'), 'recovery')}`, buttons: ['稍后处理', '打开恢复目录'] }).then(result => { if (result.response === 1) void shell.openPath(path.join(app.getPath('userData'), 'recovery')) })
+  const showRecoveryNotice = () => { if (existsSync(recoveryNotice)) void dialog.showMessageBox(win, { type: 'info', message: '发现此前另存的未保存正文', detail: `恢复副本目录：${path.join(app.getPath('userData'), 'recovery')}`, buttons: ['稍后处理', '打开恢复目录'] }).then(result => { if (result.response === 1) void shell.openPath(path.join(app.getPath('userData'), 'recovery')) }) }
+  if (startHidden) win.once('show', showRecoveryNotice)
+  else showRecoveryNotice()
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'XMemeory', submenu: [{ label: '显示窗口', click: () => win.show() }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }]))
   const pixels = Buffer.alloc(32 * 32 * 4)
   for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
@@ -246,8 +237,7 @@ app.on('before-quit', e => {
   void (async () => {
     await ensureSaved()
     if (sync?.running) throw new Error('正在同步，请同步完成后退出')
-    controller?.abort(); capture?.pause(); clearInterval(tick)
-    await generation
+    capture?.pause(); clearInterval(tick)
     await capture?.shutdown()
     // The OS closes SQLite after exit. In-flight archive requests may still finish before exit.
     quitting = true; app.quit()

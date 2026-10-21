@@ -15,6 +15,8 @@ try {
     const { createHash } = process.getBuiltinModule('node:crypto')
     const store = globalThis as any
     store.blobGets = 0
+    store.headSha = 'head'
+    store.treeSha = 'tree'
     store.remoteText = '---\nxmemeory_id: synthetic-remote\ntype: topic\ntitle: 缓存桌面测试\ncreatedAt: 2026-01-01T00:00:00.000Z\ncompleted: false\n---\n远端原正文'
     session.fromPartition('github-sync').fetch = async (input, init) => {
       const url = String(input)
@@ -23,9 +25,9 @@ try {
       const files = new Map([['manifest.json', manifest], ['topics/synthetic-remote.md', store.remoteText as string]])
       const endpoint = url.split('/synthetic')[1]
       if (!endpoint) return Response.json({ private: true })
-      if (endpoint === '/git/ref/heads/master') return Response.json({ object: { sha: 'head' } })
-      if (endpoint === '/git/commits/head') return Response.json({ tree: { sha: 'tree' } })
-      if (endpoint === '/git/trees/tree?recursive=1') return Response.json({ tree: [...files].map(([path, text]) => ({ path, sha: createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex'), mode: '100644', type: 'blob', size: Buffer.byteLength(text) })) })
+      if (endpoint === '/git/ref/heads/master') return Response.json({ object: { sha: store.headSha } })
+      if (endpoint === `/git/commits/${store.headSha}`) return Response.json({ tree: { sha: store.treeSha } })
+      if (endpoint === `/git/trees/${store.treeSha}?recursive=1`) return Response.json({ tree: [...files].map(([path, text]) => ({ path, sha: createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex'), mode: '100644', type: 'blob', size: Buffer.byteLength(text) })) })
       if (endpoint.startsWith('/git/blobs/')) {
         store.blobGets++
         const text = [...files.values()].find(text => createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex') === endpoint.split('/').at(-1))
@@ -38,16 +40,16 @@ try {
   await page.evaluate(() => window.xm.settings({ repo: 'example/synthetic', branch: 'master' }, { githubKey: 'github_pat_synthetic' }))
   await page.getByRole('button', { name: '设置', exact: true }).click()
   await page.getByRole('button', { name: '立即同步' }).click()
-  await expect(page.getByText(/已同步.*下载 1.*复用本地 1/)).toBeVisible()
+  await expect(page.getByText(/已拉取 1 项远端更新.*已上传 0 项.*下载 1.*复用本地 1/)).toBeVisible()
   expect(await app.evaluate(() => (globalThis as any).blobGets)).toBe(1)
   await page.getByRole('button', { name: '立即同步' }).click()
-  await expect(page.getByText(/已同步.*下载 0.*复用本地 2/)).toBeVisible()
+  await expect(page.getByText(/远端无更新.*已上传 0 项/)).toBeVisible()
   expect(await app.evaluate(() => (globalThis as any).blobGets)).toBe(1)
-  await app.evaluate(() => { (globalThis as any).remoteText = (globalThis as any).remoteText.replace('远端原正文', '远端新正文') })
+  await app.evaluate(() => { const store = globalThis as any; store.remoteText = store.remoteText.replace('远端原正文', '远端新正文'); store.headSha = 'head2'; store.treeSha = 'tree2' })
   await page.getByRole('button', { name: '立即同步' }).click()
-  await expect(page.getByText(/已同步.*下载 1.*复用本地 1/)).toBeVisible()
-  expect(await app.evaluate(() => (globalThis as any).blobGets)).toBe(2)
+  await expect.poll(async () => app.evaluate(() => (globalThis as any).blobGets)).toBe(2)
+  await expect(page.getByText(/已拉取 1 项远端更新.*已上传 0 项.*下载 1.*复用本地 1/)).toBeVisible()
   expect((await page.evaluate(() => window.xm.snapshot())).notes.find(n => n.id === 'synthetic-remote')?.body).toBe('远端新正文')
   await expect(page.locator('.error-banner')).toHaveCount(0)
-  console.log('PASS: 桌面连续同步第一次仅下载新增文件，第二次零下载，远端修改后只下载变化正文，状态计数与请求吻合（合成 API）')
+  console.log('PASS: 桌面连续同步第一次仅下载新增文件，第二次远端未变零请求，远端变化后只下载变化正文，状态计数与请求吻合（合成 API）')
 } finally { await app.close() }

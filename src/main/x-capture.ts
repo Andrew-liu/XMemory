@@ -2,8 +2,10 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { chromium, type Browser, type BrowserContext, type Page, type Response } from 'playwright'
-import type { ArchiveProgress } from '../shared/types'
+import type { ArchiveProgress, BookmarkGuardInfo, BookmarkRunResult } from '../shared/types'
+import { bookmarkStopText } from '../shared/bookmarks'
 import { atomic, Library } from './library'
+import { BookmarkScanner, bookmarkSummary, RiskGuard } from './x-bookmarks'
 import {
   allowedImage, articleDomMarkdown, captureFromPayload, imageCandidates, isArticleLink,
   mergeArticleDomBlocks, memoryTitle, normalizePostUrl, updatedCaptureBody,
@@ -97,6 +99,7 @@ export class XCapture {
   private page?: Page
   private running = false
   private flowActive = false
+  private bookmarksActive = false
   private stopped = false
 
   constructor(private library: Library, private userData: string, private change: () => void) {}
@@ -188,23 +191,27 @@ export class XCapture {
   async collectUrl(input: string): Promise<{ id: string; result: 'created' | 'updated' | 'unchanged' }> {
     const target = normalizePostUrl(input)
     if (!target) throw new Error('请粘贴 X 推文链接（x.com/用户名/status/数字）')
-    if (this.flowActive || this.running) throw new Error('登录或采集流程正在进行中')
+    if (this.flowActive || this.running) throw new Error(this.bookmarksActive ? '正在采集书签，请等待完成或先暂停' : '登录或采集流程正在进行中')
     this.flowActive = true
     this.stopped = false
     try {
-      let ready = false
-      try { ready = await this.refreshLogin() } catch { ready = false }
-      if (!ready) {
-        await this.login()
-        ready = await this.refreshLogin()
-      }
-      if (!ready) {
-        this.set('未检测到有效 X 登录，请重新点击采集并完成登录', { phase: 'idle' })
-        throw new Error('未检测到有效 X 登录，未开始采集')
-      }
-      await this.hideWindow().catch(() => {})
+      await this.ensureReady()
       return await this.collect(target.url, target.id)
     } finally { this.flowActive = false }
+  }
+
+  private async ensureReady() {
+    let ready = false
+    try { ready = await this.refreshLogin() } catch { ready = false }
+    if (!ready) {
+      await this.login()
+      ready = await this.refreshLogin()
+    }
+    if (!ready) {
+      this.set('未检测到有效 X 登录，请重新点击采集并完成登录', { phase: 'idle' })
+      throw new Error('未检测到有效 X 登录，未开始采集')
+    }
+    await this.hideWindow().catch(() => {})
   }
 
   private async collect(url: string, id: string) {
@@ -217,7 +224,7 @@ export class XCapture {
       const context = await this.start()
       if (!await this.refreshLogin()) throw new Error('请先在 Chrome 专属 Profile 中登录 X')
       const account = accountFromCookies(await context.cookies('https://x.com'))
-      this.set(`正在采集 ${id}`, { phase: 'collecting', found: 0, saved: 0 })
+      this.set(`正在采集 ${id}`, { phase: 'collecting', found: 0, saved: 0, mode: 'single' })
       const { result, noteId, title } = await this.collectOne(url, id, account)
       this.set(`${result === 'created' ? '已新增' : result === 'updated' ? '已更新' : '无变化'}：${title}`, { phase: 'complete', found: 1, saved: result === 'created' ? 1 : 0, lastSuccessAt: new Date().toISOString() })
       return { id: noteId, result }
@@ -233,7 +240,6 @@ export class XCapture {
   }
 
   private async localizeImages(captured: CapturedTarget, account: string) {
-    if (!this.context) throw new Error('Chrome 尚未连接，无法保存图片')
     let markdown = captured.markdown
     const downloaded: string[] = []
     let failed = 0
@@ -244,6 +250,7 @@ export class XCapture {
     let processed = 0
     for (const url of captured.post.images) {
       if (this.stopped) throw new Error('采集已暂停')
+      if (!this.context) throw new Error('Chrome 尚未连接，无法保存图片')
       if (!allowedImage(url)) continue
       let done = false
       let last = '图片下载失败'
@@ -273,10 +280,10 @@ export class XCapture {
     return { markdown, downloaded, failed, replacements, failures }
   }
 
-  private async collectOne(url: string, id: string, account: string) {
+  private async collectOne(url: string, id: string, account: string, detailPage?: Page, discoveredVia?: 'bookmarks') {
     const user = normalizePostUrl(url)?.user
-    const page = this.page || await (await this.start()).newPage()
-    this.page = page
+    const page = detailPage || this.page || await (await this.start()).newPage()
+    if (!detailPage) this.page = page
     let captured: CapturedTarget | undefined
     const onResponse = async (response: Response) => {
       if (!/\/(?:i\/api\/)?graphql\//.test(response.url()) || response.status() !== 200) return
@@ -458,8 +465,12 @@ export class XCapture {
       page.off('response', onResponse)
     }
     if (!captured) throw new Error(`未能从页面响应或正文容器取得 ${id} 的正文，未写入空记录`)
+    return this.persistCaptured(captured, account, discoveredVia)
+  }
+
+  private async persistCaptured(captured: CapturedTarget, account: string, discoveredVia?: 'bookmarks') {
     const localized = await this.localizeImages(captured, account)
-    const noteId = `x-${account}-${id}`
+    const noteId = `x-${account}-${captured.post.id}`
     const existing = this.library.notes.get(noteId)
     const title = memoryTitle(captured.post, captured.articleTitle)
     let result: 'created' | 'updated' | 'unchanged' = 'unchanged'
@@ -468,11 +479,14 @@ export class XCapture {
       result = 'created'
     } else {
       const publishedChanged = !!captured.post.publishedAt && existing.publishedAt !== captured.post.publishedAt
-      const nextBody = updatedCaptureBody(existing, captured.markdown, localized.markdown, localized.replacements)
-      if (nextBody !== existing.body || (!existing.userEdited && captured.markdown.length >= existing.body.length)) {
+      const upgrade = existing.partial === true && !captured.post.partial
+      const nextBody = updatedCaptureBody(existing, captured.markdown, localized.markdown, localized.replacements, captured.post.partial)
+      if (nextBody !== existing.body || (!existing.userEdited && (captured.markdown.length >= existing.body.length || upgrade))) {
         const capturedImages = [...new Set([...(existing.capturedImages || []), ...localized.downloaded])]
-        if (existing.body !== nextBody || existing.partial !== captured.post.partial || capturedImages.length !== (existing.capturedImages || []).length || publishedChanged) {
-          this.library.save({ ...existing, body: nextBody, publishedAt: captured.post.publishedAt || existing.publishedAt, partial: captured.post.partial, capturedImages }, existing.hash)
+        const replaced = nextBody === localized.markdown
+        const nextPartial = replaced ? captured.post.partial : existing.partial
+        if (existing.body !== nextBody || existing.partial !== nextPartial || capturedImages.length !== (existing.capturedImages || []).length || publishedChanged) {
+          this.library.save({ ...existing, body: nextBody, publishedAt: captured.post.publishedAt || existing.publishedAt, partial: nextPartial, capturedImages }, existing.hash)
           result = 'updated'
         }
       } else if (publishedChanged) {
@@ -480,8 +494,106 @@ export class XCapture {
         result = 'updated'
       }
     }
-    atomic(path.join(this.library.root, 'metadata', `${noteId}.capture.json`), JSON.stringify({ ...captured.structured, publishedAt: captured.post.publishedAt, attachmentStatus: localized.failed ? localized.downloaded.length ? 'partial' : 'remote-only' : localized.downloaded.length ? 'complete' : 'none', localImages: localized.replacements, imageErrors: localized.failures, capturedAt: new Date().toISOString() }, null, 2))
+    atomic(path.join(this.library.root, 'metadata', `${noteId}.capture.json`), JSON.stringify({ ...captured.structured, discoveredVia, publishedAt: captured.post.publishedAt, attachmentStatus: localized.failed ? localized.downloaded.length ? 'partial' : 'remote-only' : localized.downloaded.length ? 'complete' : 'none', localImages: localized.replacements, imageErrors: localized.failures, capturedAt: new Date().toISOString() }, null, 2))
     return { result, noteId, title }
+  }
+
+  private interruptibleSleep(ms: number) {
+    const deadline = Date.now() + ms
+    return new Promise<void>(resolve => {
+      const timer = setInterval(() => {
+        if (this.stopped || Date.now() >= deadline) { clearInterval(timer); resolve() }
+      }, Math.min(200, ms))
+    })
+  }
+
+  bookmarksSummary(): BookmarkGuardInfo { return bookmarkSummary(this.library.root) }
+
+  async collectBookmarks(limit: 20 | 50 | 100): Promise<BookmarkRunResult> {
+    if (this.flowActive || this.running) throw new Error('登录或采集流程正在进行中')
+    this.flowActive = true
+    this.bookmarksActive = true
+    this.stopped = false
+    let listPage: Page | undefined
+    let guard: RiskGuard | undefined
+    try {
+      await this.ensureReady()
+      const context = await this.start()
+      const account = accountFromCookies(await context.cookies('https://x.com'))
+      guard = new RiskGuard(this.library.root, account)
+      guard.canStart(new Date())
+      this.progress.imagesDone = 0
+      this.progress.imagesFailed = 0
+      const detailPage = () => this.page
+      const scanner = new BookmarkScanner(guard, {
+        isKnown: id => this.library.notes.has(`x-${account}-${id}`),
+        saveDirect: async (tweet, id) => {
+          const captured = captureFromPayload(tweet, id)
+          if (!captured) throw new Error(`未能解析书签条目 ${id}`)
+          return (await this.persistCaptured(captured, account, 'bookmarks')).result
+        },
+        collectDetail: async (id, url) => {
+          const page = detailPage() || await context.newPage()
+          this.page = page
+          await page.bringToFront().catch(() => {})
+          return (await this.collectOne(url, id, account, page, 'bookmarks')).result
+        },
+        scroll: async () => {
+          if (!listPage) return { moved: false, atEnd: false }
+          await listPage.bringToFront().catch(() => {})
+          return listPage.evaluate(d => {
+            const before = window.scrollY
+            window.scrollBy({ top: d, behavior: 'auto' })
+            const el = document.scrollingElement || document.documentElement
+            return { moved: window.scrollY > before, atEnd: window.scrollY + window.innerHeight >= el.scrollHeight - 200 }
+          }, 600 + Math.floor(Math.random() * 400)).catch(() => ({ moved: false, atEnd: false }))
+        },
+        sleep: ms => this.interruptibleSleep(ms),
+        now: () => new Date(),
+        random: () => Math.random(),
+        stopped: () => this.stopped,
+        progress: p => this.set(`已检查 ${p.checked} · 新增 ${p.created} · 已存在 ${p.skipped} · 长文队列 ${p.queued} · 失败 ${p.failed}`, { phase: 'collecting', mode: 'bookmarks', checked: p.checked, saved: p.created, skipped: p.skipped, failed: p.failed, queued: p.queued })
+      })
+      listPage = await context.newPage()
+      const onResponse = (response: Response) => {
+        if (!/\/graphql\/[\w-]+\/Bookmarks(?:\?|$)/.test(response.url())) return
+        void (async () => {
+          let payload: unknown
+          try { payload = await response.json() } catch { payload = undefined }
+          scanner.ingest(response.status(), payload)
+        })()
+      }
+      listPage.on('response', onResponse)
+      try {
+        await listPage.goto('https://x.com/i/bookmarks', { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(error => {
+          throw new Error(isTimeout(error) ? '打开书签页失败：超时' : '打开书签页失败：网络错误')
+        })
+        if (/\/i\/flow\/login|\/account\/access/.test(listPage.url())) scanner.breaker('auth')
+        const result = await scanner.run(limit)
+        const text = `书签采集结束（${bookmarkStopText(result.stopReason)}）：新增 ${result.created} · 已存在 ${result.skipped} · 失败 ${result.failed}`
+        this.set(text, { phase: result.stopReason === 'paused' ? 'paused' : result.stopReason.startsWith('breaker:') ? 'partial' : 'complete', checked: result.checked, saved: result.created, skipped: result.skipped, failed: result.failed, queued: result.articlesQueued })
+        if (result.stopReason === 'breaker:auth') {
+          await this.placeWindow(80).catch(() => {})
+          await this.page?.bringToFront().catch(() => {})
+        }
+        return result
+      } finally {
+        listPage.off('response', onResponse)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '书签采集失败'
+      this.set(message, { phase: this.stopped ? 'paused' : 'partial' })
+      if (/登录|验证/.test(message)) {
+        await this.placeWindow(80).catch(() => {})
+        await this.page?.bringToFront().catch(() => {})
+      }
+      throw error
+    } finally {
+      await listPage?.close().catch(() => {})
+      guard?.save()
+      this.bookmarksActive = false
+      this.flowActive = false
+    }
   }
 
   pause() {

@@ -1,5 +1,198 @@
 # XMemeory 设计方案
 
+## v0.5.1 — 书签批量采集、移除 AI 创作、开机自启、先拉后推同步（2026-10-21）
+
+状态：已确认（2026-10-21）。用户确认本节全部范围；风控参数按草案默认值（单次 20/50/100、每日 200 条、每日长文 50 篇），开机自启后不自动采集（仍放在 v0.6.0）。
+
+执行结果（2026-10-21）：已实现，自动化检查与真实书签验收通过，详见 ChangeLog。验收中发现并修复：滚动穿过已加载内容时误判“到底”（改为页面确实无法继续滚动且无新数据才计空转）；长文内嵌视频/GIF、emoji 实体被误标不完整；`t.co` 链接；不完整记忆重新采集后未升级；推送被拒重试时合并基线未更新。开机自启的重启实测和真实仓库同步实测待用户在安装版中验收。用户已选定（2026-10-21）：“去掉两个测试 case 的采集限制”指书签列表批量采集；写作模型按“整体删除 AI 创作”处理，启动时清除本机保存的模型 API Key，已生成的候选稿文件保留；开机自启默认关闭，在设置中开启，自启时不弹窗口、直接驻留托盘；Git 同步按“先比对远端提交 → 有更新先拉取合并 → 再上传本地 → 推送被拒自动重拉重试（最多 3 次）”实现，用户未遇到特定报错。
+
+### 背景与目标
+
+v0.5.0 已能采集任意一条粘贴的推文或长文，但仍要逐条粘贴，用户积累在 X 书签里的内容进不来。设置页的“写作模型”及其背后的 AI 创作链路（模型服务、API Key、联网搜索、候选稿生成）用户不再需要。另外用户希望应用随开机启动、常驻托盘；GitHub 同步要明确先确认远端有无更新、本地吸收远端变化后再上传。
+
+目标：
+
+1. 从 X 书签页批量采集，自带去重、额度、断点、熔断，按 20 → 100 条逐级验收。
+2. 删除 AI 创作及模型配置，相关依赖和代码一并移除。
+3. 新增开机自启开关。
+4. 同步改为“检查远端 → 拉取合并 → 上传 → 被拒重试”的显式流程。
+
+### 功能范围与非目标
+
+范围：
+
+1. **书签批量采集**
+   - 记忆页新增“采集书签”按钮和“本次上限”选择（20 / 50 / 100，默认 20）；粘贴链接单条采集保留。
+   - 用专属 Chrome Profile 在屏幕外打开 `https://x.com/i/bookmarks`，只监听页面自己发出的 Bookmarks GraphQL 响应，缓慢滚动加载；不主动构造或重放 GraphQL 请求，不复用 cursor 自行翻页。
+   - 按推文 ID 去重：资料库里已有 `x-<账号ID>-<推文ID>`（包括已移到回收站的）一律跳过，不改写、不从回收站恢复。
+   - 普通短推、Note Tweet：响应里正文完整（`parseTweetResult` 判定非 `partial`）时直接用书签响应落盘，不打开详情页。
+   - 长文、被截断的推文：加入串行队列，逐条调用 v0.5.0 的单条采集流程（打开详情页、结构化优先、DOM 兜底），两条之间随机等待 8–20 秒。
+   - 图片沿用 v0.5.0：逐张下载，`orig → large → medium`，失败保留远程链接。视频不下载。
+   - 批量与单条共用同一套落盘函数，Markdown、`capture.json`、“我的笔记”保护规则完全一致。
+2. **移除 AI 创作**
+   - 删除：灵感页“创作”按钮和创作面板、各页“加入创作素材”、设置页“写作模型”区块、IPC `generate`/`cancel`/`onRun`、模型服务配置与校验、Jina 联网搜索。
+   - 删除文件：`src/main/ai.ts`、`src/main/web-search.ts`、`src/renderer/ProviderSettings.tsx`；`providers.ts` 中的 `validateProviders` 删除，凭据清理函数保留。
+   - 移除依赖：`ai`、`@ai-sdk/deepseek`、`@ai-sdk/openai-compatible`；`twitter-text`（及 `@types/twitter-text`）若仅被创作面板使用则一并移除，其他地方仍在用则保留。
+   - 已有候选稿（`drafts/`）照常保留、可搜索、可打开阅读和编辑，“返回原灵感”保留，继续参与同步；不再生成新的候选稿。
+3. **开机自启**
+   - 设置页“外观”区块新增“开机时自动启动”开关，默认关闭。
+   - 开关状态以系统登录项的实际状态为准（每次读取 `app.getLoginItemSettings`），不另存一份到 `settings.json`，避免用户在任务管理器里关闭后界面显示不一致。
+   - 自启时窗口不显示，只出现托盘图标，点托盘打开。开机自启不会触发书签采集。
+4. **先拉后推同步**：见“技术方案 · 同步”。手动“立即同步”、启动时同步、每 10 分钟定时同步都走同一流程。
+
+非目标：
+
+- 启动后自动扫描书签、定时采集（v0.6.0）；开机自启后也不自动采集。
+- 取消收藏后同步删除本地记忆；完整推文串、回复、评论区；引用推文正文（仍只保留链接）；视频下载。
+- 删除已有候选稿或改写其 Front Matter。
+- Mac 端验收、代码签名。
+
+### 主要使用流程
+
+**书签采集**
+
+1. 记忆页选“本次上限”，点“采集书签”。未登录时沿用现有登录流程，登录完成后自动继续。
+2. Chrome 在屏幕外打开书签页。进度区实时显示：已检查 N · 新增 M · 已存在 K · 长文队列 Q · 失败 F。
+3. 短推随响应直接保存；长文排队逐条打开详情页采集。
+4. 触发任一停止条件后结束，显示结束原因（达到本次上限 / 今日额度用完 / 已到书签底部 / 连续 20 条已存在 / 熔断原因 / 用户暂停）。
+5. 点“暂停”：当前这一条处理完（或图片下载中止）即停，已保存的保留；下次再点“采集书签”从头滚动，已有的自动跳过，相当于断点续采。
+
+**开机自启**：设置 → 勾选“开机时自动启动” → 下次登录系统时 XMemeory 在托盘中启动。
+
+**同步**：用户无感，状态栏显示“远端无更新，已上传 M 项”或“已拉取 N 项远端更新，已上传 M 项”等。
+
+### 技术方案与模块职责
+
+**书签采集**
+
+- 实测结构（2026-10-21，用户账号书签页，滚动约 12 屏，取得 2 个响应，只记录结构和长度，未保存正文）：操作名 `Bookmarks`，GET，查询参数 `variables`、`features`；路径 `data.bookmark_timeline_v2.timeline.instructions[]`，类型 `TimelineAddEntries`；每页 20 条 `tweet-<ID>` 条目（`content.entryType = TimelineTimelineItem`、`itemContent.itemType = TimelineTweet`、`itemContent.tweet_results.result.__typename = Tweet`）加 `cursor-top-*`、`cursor-bottom-*` 两个 `TimelineTimelineCursor` 条目；本次样本未出现 `TweetWithVisibilityResults`、推广条目和 `errors`。长推文的 `note_tweet.note_tweet_results.result.text` 为全文（如 `full_text` 134 字、Note 2103 字），可直接落盘。长文条目的 `article.article_results.result` 只有 `cover_media/id/lifecycle_state/metadata/preview_text/rest_id/title`，**没有 `content_state`**，必须打开详情页；两页 40 条中有 18 条长文。滚动由页面自然触发下一页请求，书签列表为虚拟列表（DOM 中只保留约 8 条）。
+- 到底判定补充：收到只含 cursor、没有任何 `tweet-` 条目的 Bookmarks 响应即视为到达底部；另保留“连续 8 轮滚动无新 ID 且无新响应”作为兜底。
+- `src/main/x-parse.ts`：新增纯函数 `bookmarkEntries(payload) → { tweets: Json[]; bottomCursor?: string; errors: string[] }`，从 Bookmarks 响应的 timeline instructions 中取出推文结果（兼容 `TweetWithVisibilityResults` 包装），忽略推广和非推文条目。`bottomCursor` 只用来判断是否到底（同一 cursor 连续出现），不用于发请求。
+- `src/main/x-bookmarks.ts`（新增）：
+  - `RiskGuard`：读写 `local/x-bookmarks-<账号ID>.json`（`local/` 不参与同步），按本地日期重置当日计数，持久化熔断状态。
+  - `BookmarkScanner`：打开书签页、挂响应监听、滚动、去重、分流短推和长文队列、判断停止条件。
+- `src/main/x-capture.ts`：把 `collectOne` 末尾的落盘逻辑抽成 `persistCaptured(captured, account)`，单条与批量共用；新增 `collectBookmarks(limit)`，复用 `start()`、`refreshLogin()`、窗口隐藏和登录流程；与 `collectUrl` 互斥（同一时间只允许一个采集任务）。
+
+**风控参数**（固定值，界面不提供“无限制”）
+
+| 项目 | 值 |
+|---|---|
+| 本次上限 | 20 / 50 / 100 条新增，用户选择，默认 20 |
+| 每日新增上限 | 200 条（含短推和长文） |
+| 每日长文上限 | 50 篇 |
+| 单次运行时长 | 最长 30 分钟 |
+| 滚动间隔 | 随机 1.8–4.5 秒，距离 600–1000 像素随机 |
+| 批次停顿 | 每新增 30 条，暂停 2–4 分钟 |
+| 长文间隔 | 随机 8–20 秒 |
+
+**停止条件**
+
+- 达到本次上限、今日额度或 30 分钟。
+- 到底判定：连续 8 轮滚动既没有新的推文 ID，也没有新的 Bookmarks 响应 → 视为到达底部；第一次到底时把 `historyComplete` 置为 `true`。
+- 增量截断：`historyComplete` 为 `true` 后，连续 20 条已存在即停止；在此之前（历史回溯阶段）已存在的条目只跳过、不停止，一直滚到上限或底部。
+
+**熔断**（立即停止、保存状态、显示原因、不自动重试）
+
+- Bookmarks 响应 HTTP 401/403，或页面跳转到登录/账号验证页：需要用户处理后手动重新开始，Chrome 窗口移回屏幕内。
+- HTTP 429：冷却 2 小时，冷却期间“采集书签”不可用并显示可重试时间。
+- 连续 3 个 Bookmarks 响应带 `errors`、连续 3 条采集失败，或推文 ID 序列出现循环：停止并要求用户手动重新开始。
+
+**AI 创作移除**
+
+- `index.ts`：删除 `generate`/`cancel` 分支、`controller`/`generation` 状态、`settingsSchema` 中的 `providers`/`activeProvider`、默认设置里的 DeepSeek；`openLibrary`/退出流程中对 `controller` 的等待一并删除。
+- `src.tsx`：删除 `compose`、`instruction`、`mode`、`agentMode`、`materials`、`output`、`running`、`switchingModel` 等状态及对应 UI；“返回原灵感”等候选稿阅读功能保留。
+- `types.ts`：删除 `Provider`、`RunEvent`、`Bridge.generate/cancel/onRun`、`Settings.providers/activeProvider`；`Note` 上的 `sources`、`webSources`、`agentMode`、`instruction`、`generationProvider` 字段保留（旧候选稿的 Front Matter 仍需原样读写），`AgentMode`、`WebSource` 类型随之保留。
+
+**开机自启**
+
+- Windows：`app.setLoginItemSettings({ openAtLogin, args: ['--hidden'] })`；启动时 `process.argv` 含 `--hidden` 则不显示窗口。macOS：使用 `openAtLogin`，以 `wasOpenedAtLogin` 判断是否隐藏（未在 Mac 验证）。
+- 开发模式（`!app.isPackaged`）下开关禁用，提示“仅安装版可用”，避免把 `electron.exe` 注册成开机项。
+- 测试环境（存在 `XMEMEORY_TEST_DATA`）下不调用系统登录项 API，改用内存中的假实现，桌面测试不会改动本机自启配置。
+
+**同步：先拉后推**（改造 `GithubSync.run`）
+
+1. **检查远端**：读取分支 `head`，与同步状态文件中的 `lastRemoteSha` 比较。
+2. **拉取合并**（`head` ≠ `lastRemoteSha`，或旧状态文件没有该字段时）：沿用现有逻辑——读取远端 tree、下载变化的 blob、三方合并，远端变化写入本地，冲突进入冲突列表。远端未变化时跳过 tree 和 blob 下载，以上次同步保存的 `hashes` 和 `lastTreeSha` 作为远端基线。
+3. **上传**：本地与远端基线不同的文件上传为 blob，以远端 tree 为基础创建 tree 和 commit，父提交为第 1 步读到的 `head`；没有本地变化时不创建提交。
+4. **推送被拒重试**：更新分支引用不强制；若因远端已前进被拒（GitHub 返回 422），回到第 1 步重新拉取合并再上传，最多 3 轮；仍失败则报“远端持续变化，本地内容已保留，请稍后重试”。
+5. 成功后写入状态文件：`hashes`、`lastRemoteSha`（新提交或未变化的 `head`）、`lastTreeSha`、`time`。
+6. 状态文案包含远端是否有更新、拉取数量、上传数量、冲突数量。
+
+编辑器有未保存内容时，仍在合并写入本地之前中止本轮同步（沿用现有行为）。
+
+### 接口与数据结构
+
+- Bridge：删除 `generate`、`cancel`、`onRun`；新增 `collectBookmarks(limit: 20 | 50 | 100): Promise<BookmarkRunResult>`、`setOpenAtLogin(enabled: boolean): Promise<void>`。
+- `BookmarkRunResult = { checked, created, skipped, failed, articlesQueued, stopReason }`，`stopReason` 取值：`limit | daily-quota | bottom | known-streak | time | paused | breaker:<原因>`。
+- `ArchiveProgress` 新增 `mode: 'single' | 'bookmarks'`、`checked`、`skipped`、`failed`、`queued`；旧字段保留。
+- Snapshot 新增 `bookmarks: { newToday, articlesToday, dailyLimit, historyComplete, lastRunAt?, lastStopReason?, breaker?: { reason, at, until? } }`、`settings.openAtLogin: boolean`（读取自系统）、`settings.openAtLoginAvailable: boolean`。
+- Settings：删除 `providers`、`activeProvider`。
+- `local/x-bookmarks-<账号ID>.json`：`{ day, newToday, articlesToday, historyComplete, lastRunAt, lastStopReason, breaker? }`，原子写入，不参与同步，不含 Cookie、令牌或推文正文。
+- 同步状态文件 `local/sync-<hash>.json`：在 `hashes`、`time` 之外新增 `lastRemoteSha`、`lastTreeSha`，旧文件缺字段时按“远端有更新”处理。
+- 记忆 Markdown 与 `capture.json` 格式不变；批量采集的条目 `capture.json` 增加 `discoveredVia: 'bookmarks'`。
+
+### 异常与边界
+
+- Bookmarks 响应结构与预期不符（找不到 timeline instructions）：首次出现即停止并提示“书签页结构已变化”，不猜测解析。
+- 书签中的推文已删除、受保护或不可见（`TweetTombstone` 等）：计入“已检查”，跳过，不写入记录，不计入失败熔断。
+- 单条长文采集失败：计入失败，继续下一条；连续 3 条失败熔断。
+- 应用退出或 Chrome 崩溃：已保存的条目保留，当日计数已持久化；下次重新扫描即可续上。
+- 用户在采集中粘贴单条链接：提示“正在采集书签”，不并发执行。
+- 删除 AI 后旧 `settings.json` 中的 `providers`、`activeProvider` 读取时忽略、下次保存时不再写入；`credentials.bin` 中除 `github` 外的键全部删除后重新加密保存，每次启动检查，无多余键时不重写。
+- 开机项注册失败（权限或策略限制）：开关恢复原状并提示原因。
+- 同步第 2 步发现远端未变化但本地基线缺失（状态文件损坏）：退回完整拉取流程。
+
+### 兼容性与数据迁移
+
+- 已有记忆、候选稿、选题、灵感文件均不改写。
+- 模型 API Key 被删除，不可恢复；用户已确认（选择“整体删除 AI 创作”时说明了会清除）。GitHub Token 保留。
+- 专属 Chrome Profile、X 登录态不动。
+- 同步白名单不变；旧同步状态文件可直接读取。
+- 自启默认关闭，升级不会自动注册开机项。
+
+### 阶段任务
+
+0. **书签响应结构实测**（编码前，需用户先退出正在运行的 XMemeory 以释放专属 Profile）：用临时脚本在屏幕外打开书签页、只滚动 2 屏，记录 Bookmarks 响应的操作名、instructions/entries 路径、推文结果包装形式、是否包含 Note Tweet 全文、长文是否只给预览。只在 `trash/` 保存脱敏结构摘要，不保存正文，用完删除。结构与本设计不符则先更新设计再实施。
+1. 移除 AI 创作：代码、依赖、测试、启动清理。
+2. 开机自启：主进程、设置 UI、测试假实现。
+3. 同步改造与单元测试。
+4. 书签采集：`bookmarkEntries` 解析、`RiskGuard`、`BookmarkScanner`、`persistCaptured` 抽取、IPC 与记忆页 UI。
+5. 类型检查、核心测试、构建、桌面专项；真实账号书签验收；更新 README、ChangeLog、AGENTS、版本号；打包安装包。
+
+### 功能测试用例
+
+单元测试（合成数据）：
+
+- `bookmarkEntries`：普通推文、`TweetWithVisibilityResults` 包装、Tombstone、推广条目、cursor 条目、带 `errors` 的响应、空 instructions。
+- `RiskGuard`：跨日重置、每日新增/长文上限、429 冷却到期、熔断持久化与手动解除、状态文件损坏时按保守默认处理。
+- 扫描调度（注入假页面和假时钟，不联网）：已存在跳过且不改写、回收站条目不恢复、历史阶段不因连续已存在而停止、`historyComplete` 后连续 20 条已存在即停、连续 8 轮无新内容判到底、达到上限停止、短推直接落盘、长文入队并串行调用单条采集、连续 3 条失败熔断、暂停后不再处理新条目。
+- `persistCaptured`：批量与单条输出一致；“我的笔记”不被覆盖（沿用现有用例）。
+- 同步：远端未变化时不下载 tree/blob、只上传本地变化；远端有更新时先写入本地再上传；无本地变化时不创建提交；推送返回 422 时重新拉取并重试，第 3 轮仍失败报错且本地内容不丢；旧状态文件缺 `lastRemoteSha` 走完整流程。
+- 凭据清理：只保留 `github`；无多余键时不重写文件。
+- 设置：旧 `providers`/`activeProvider` 被忽略且不再写回。
+
+桌面专项（真实 Electron、合成资料库）：
+
+- 设置页不再出现“写作模型”，灵感页没有“创作”和“加入创作素材”；已有候选稿能从搜索打开并显示“返回原灵感”。
+- 设置页有“开机时自动启动”开关，在测试假实现下可切换且状态回显；开发模式下禁用并显示提示。
+- 记忆页有“采集书签”按钮和上限选择；采集中两种采集按钮均禁用。
+- 删除 `desktop-creation`、`desktop-providers` 专项及 `web-search`、`providers` 中针对已删功能的单元测试；其他专项中涉及创作的步骤同步调整，不删除与创作无关的断言。
+
+真实环境人工验收（需用户在场或授权）：
+
+- 书签第一轮：上限 20。核对新增条数、短推正文与图片、至少 1 篇长文结构完整、无重复；再点一次，结果为“已存在”跳过、不重复写入。
+- 书签第二轮（第一轮无验证、无限流后由用户决定）：上限 100，验证批次停顿、暂停与续采。
+- 开机自启：安装包中开启 → 注销或重启 → 托盘出现、窗口不弹出；关闭开关后不再自启。
+- 同步：在 GitHub 网页上直接改一个文件后同步，本地出现该修改且本地新改动也上传成功。
+
+### 验收标准
+
+- 书签采集只消费书签页自然产生的响应；去重、每日额度、停止条件、熔断都有测试覆盖并在真实 20 条验收中表现正确，没有重复写入和无限滚动。
+- 代码、依赖、界面中不再有 AI 创作和模型配置；本机模型 Key 已清除，GitHub Token 完好；旧候选稿可读。
+- 开机自启默认关闭，开启后以托盘方式启动，开关与系统状态一致；测试不改动本机配置。
+- 同步严格按“检查远端 → 拉取合并 → 上传 → 被拒重试”执行，远端修改不会被本地覆盖，推送冲突能自动恢复。
+- 类型检查、核心测试、构建、相关桌面专项全部通过；安装包可启动。
+
 ## v0.5.0 — 记忆可用：粘贴链接单条采集（2026-10-20）
 
 状态：已确认（2026-10-20）。用户确认本节全部范围；引用推文维持仅保留链接，不在本版扩展。

@@ -1,10 +1,13 @@
 import { expect, it } from 'vitest'
-import { validateProviders } from '../src/main/providers'
-const p = { id: 'deepseek', name: 'DeepSeek', baseURL: 'https://example.test', model: 'model' }
-it('模型 ID 唯一、当前服务及 Key 归属必须有效', () => {
-  expect(() => validateProviders([p], p.id, p.id)).not.toThrow()
-  for (const run of [() => validateProviders([], ''), () => validateProviders([p, p], p.id), () => validateProviders([p], 'missing'), () => validateProviders([p], p.id, 'missing')]) expect(run).toThrow()
+import { pruneSecrets } from '../src/main/providers'
+
+it('凭据清理只保留 GitHub Token，其余密钥全部移除', () => {
+  const secrets = { cookies: 'a', xState: 'b', xEndpoint: 'c', deepseek: 'd', github: 'keep' }
+  expect(pruneSecrets(secrets)).toBe(true)
+  expect(secrets).toEqual({ github: 'keep' })
 })
-it.each(['github', 'cookies', 'xState', '__proto__', 'constructor', 'prototype'])('保留凭据 ID %s 不能用于模型', id => {
-  expect(() => validateProviders([{ ...p, id }], id, id)).toThrow('保留名称')
+it('仅有 GitHub Token 时不改写也不重写文件', () => {
+  const secrets = { github: 'keep' }
+  expect(pruneSecrets(secrets)).toBe(false)
+  expect(secrets).toEqual({ github: 'keep' })
 })

@@ -86,7 +86,7 @@ export function extractArticleImages(article: Json | undefined) {
   if (!article || typeof article !== 'object') return []
   const urls: string[] = []
   const take = (node: Json | undefined) => {
-    const url = node?.media_info?.original_img_url || node?.media_info?.url || node?.original_img_url
+    const url = node?.media_info?.original_img_url || node?.media_info?.preview_image?.original_img_url || node?.media_info?.url || node?.original_img_url
     if (typeof url === 'string') urls.push(url)
   }
   take(article.cover_media)
@@ -173,11 +173,17 @@ export function articleFromContentState(article: Json | undefined, _url?: string
       return value && typeof value === 'object' ? value as Json : undefined
     }
   }
-  const mediaUrl = (mediaId: unknown) => {
+  const mediaRef = (mediaId: unknown): { url?: string; video: boolean } | undefined => {
     const entities = Array.isArray(article.media_entities) ? article.media_entities : []
     const item = entities.find((m: Json) => String(m?.media_id) === String(mediaId))
-    const url = item?.media_info?.original_img_url
-    return typeof url === 'string' && allowedImage(url) ? url as string : undefined
+    const info = item?.media_info
+    const imageUrl = info?.original_img_url
+    if (typeof imageUrl === 'string' && allowedImage(imageUrl)) return { url: imageUrl, video: false }
+    if (info?.__typename === 'ApiVideo' || info?.__typename === 'ApiGif') {
+      const preview = info?.preview_image?.original_img_url
+      return { url: typeof preview === 'string' && allowedImage(preview) ? preview : undefined, video: true }
+    }
+    return undefined
   }
   const trimRange = (text: string, offset = 0, length = 0): [number, number] => {
     let start = Math.max(0, Math.min(text.length, Number(offset) || 0))
@@ -201,8 +207,17 @@ export function articleFromContentState(article: Json | undefined, _url?: string
       if (entity.type === 'LINK' && typeof entity.data?.url === 'string' && entity.data.url.startsWith('https://')) {
         const [start, end] = trimRange(text, range.offset, range.length)
         if (start >= end) continue
-        add(closes, end, 0, start, `](${entity.data.url})`)
+        let href = entity.data.url
+        try {
+          if (new URL(href).hostname === 't.co') {
+            const anchor = text.slice(start, end).trim()
+            try { if (new URL(anchor).protocol === 'https:') href = anchor } catch { /* Anchor is plain text, keep the short link. */ }
+          }
+        } catch { /* Keep the entity URL when it cannot be parsed. */ }
+        add(closes, end, 0, start, `](${href})`)
         add(opens, start, 0, start, '[')
+      } else if (entity.type === 'TWEMOJI') {
+        // The emoji character is already part of the block text; the svg link adds nothing.
       } else {
         reasons.push(`unknown-entity:${String(entity.type || 'UNKNOWN')}`)
       }
@@ -236,11 +251,21 @@ export function articleFromContentState(article: Json | undefined, _url?: string
         const entityType = String(entity?.type || '')
         if (entityType === 'MEDIA') {
           const items = Array.isArray(entity?.data?.mediaItems) ? entity.data.mediaItems : []
-          const urls = items.map((item: Json) => mediaUrl(item?.mediaId)).filter((url: string | undefined): url is string => !!url)
-          if (urls.length) {
-            bodyImages.push(...urls)
-            emit.push({ text: urls.map((url: string) => `![X 图片](${url})`).join('\n') })
-          } else reasons.push('media-unresolved')
+          const parts: string[] = []
+          let unresolved = 0
+          for (const item of items) {
+            const ref = mediaRef(item?.mediaId)
+            if (!ref) { unresolved++; continue }
+            if (ref.video) {
+              if (ref.url) { bodyImages.push(ref.url); parts.push(`![X 视频封面](${ref.url})`) }
+              parts.push('> 视频未下载，仅保留封面，请打开原文观看。')
+            } else {
+              bodyImages.push(ref.url!)
+              parts.push(`![X 图片](${ref.url})`)
+            }
+          }
+          if (parts.length) emit.push({ text: parts.join('\n') })
+          if (unresolved) reasons.push('media-unresolved')
         } else if (entityType === 'MARKDOWN') {
           const markdown = typeof entity?.data?.markdown === 'string' ? entity.data.markdown.trim() : ''
           if (markdown) emit.push({ text: markdown })
@@ -343,9 +368,9 @@ export function replaceCapturedImages(body: string, replacements: Record<string,
   return body
 }
 
-export function updatedCaptureBody(existing: Pick<Note, 'body' | 'userEdited'>, remote: string, localized: string, replacements: Record<string, string>) {
+export function updatedCaptureBody(existing: Pick<Note, 'body' | 'userEdited' | 'partial'>, remote: string, localized: string, replacements: Record<string, string>, incomingPartial = false) {
   const hasNotes = !!existing.body.split(/^# 我的笔记\s*$/m).slice(1).join('').trim()
-  if (!existing.userEdited && !hasNotes && remote.length >= existing.body.length) return localized
+  if (!existing.userEdited && !hasNotes && (remote.length >= existing.body.length || (existing.partial === true && !incomingPartial))) return localized
   return replaceCapturedImages(existing.body, replacements)
 }
 
@@ -440,4 +465,38 @@ export function memoryTitle(post: ArchivedPost, articleTitle?: string) {
     .replace(/\s+/g, ' ')
     .trim()
   return line.slice(0, 80) || `X 内容 ${post.id}`
+}
+
+const isTweet = (result: Json | undefined): result is Json => !!result && /^\d+$/.test(String(result.rest_id || '')) && !!result.legacy
+export function bookmarkEntries(payload: unknown): { found: boolean; tweets: Json[]; unavailable: number; bottomCursor?: string; errors: string[] } {
+  const root = payload as Json | undefined
+  const errors: string[] = []
+  if (Array.isArray(root?.errors)) for (const error of root.errors) errors.push(String(error?.message || error?.code || '未知错误'))
+  const instructions = root?.data?.bookmark_timeline_v2?.timeline?.instructions
+  if (!Array.isArray(instructions)) return { found: false, tweets: [], unavailable: 0, errors }
+  const tweets: Json[] = []
+  let unavailable = 0
+  let bottomCursor: string | undefined
+  for (const instruction of instructions) {
+    if (instruction?.type !== 'TimelineAddEntries' || !Array.isArray(instruction.entries)) continue
+    for (const entry of instruction.entries) {
+      const content = entry?.content
+      if (content?.entryType === 'TimelineTimelineCursor') {
+        if (content?.cursorType === 'Bottom' && typeof content?.value === 'string') bottomCursor = content.value
+        continue
+      }
+      const item = content?.itemContent
+      if (!item || item.itemType !== 'TimelineTweet' || item.promotedMetadata) continue
+      const result = item.tweet_results?.result
+      if (result?.__typename === 'TweetWithVisibilityResults') {
+        if (isTweet(result.tweet)) tweets.push(result.tweet)
+        else unavailable++
+        continue
+      }
+      if (result?.__typename === 'TweetTombstone' || result?.__typename === 'TweetUnavailable') { unavailable++; continue }
+      if (isTweet(result)) tweets.push(result)
+      else unavailable++
+    }
+  }
+  return { found: true, tweets, unavailable, bottomCursor, errors }
 }
