@@ -1,3 +1,4 @@
+import type { Palette } from './themes'
 export type Kind = 'inspiration' | 'memory' | 'draft' | 'topic'
 export type AgentMode = 'local' | 'web'
 export interface WebSource { title: string; url: string; source: string; accessedAt: string }
@@ -31,21 +32,30 @@ export interface BookmarkGuardInfo {
   historyComplete: boolean; lastRunAt?: string; lastStopReason?: string; breaker?: BookmarkBreaker
 }
 export interface BookmarkRunResult { checked: number; created: number; skipped: number; failed: number; articlesQueued: number; stopReason: string }
+export type AutoSkipReason = 'login' | 'cooldown' | 'quota' | 'busy' | 'error'
+export interface AutoCollectState {
+  enabled: boolean; active: boolean; limit?: number; nextRunAt?: string
+  skip?: { reason: AutoSkipReason; at: string; until?: string; message?: string }
+  lastRun?: { at: string; created: number; checked: number; stopReason: string }
+}
+export interface PartialRetryInfo { attempts: number; lastAttemptAt?: string; nextAt?: string; result?: 'incomplete' | 'error' | 'review'; reason?: string }
+export type MemoryView = 'list' | 'card'
 export interface Conflict { id: string; noteId: string; title: string; current: Note; incoming: Note; createdAt: string; currentRaw?: string; incomingRaw?: string; currentMetadata?: Record<string, unknown>; incomingMetadata?: Record<string, unknown> }
 export interface Settings {
-  theme: 'system' | 'light' | 'dark'
+  theme: 'system' | 'light' | 'dark'; palette?: Palette
   closeToTray: boolean; repo?: string; branch: string; hasGithubKey?: boolean
   githubTokenType?: 'fine-grained' | 'classic' | 'invalid'; githubTokenSavedAt?: string
   legacyXCleanedAt?: string; openAtLogin?: boolean; openAtLoginAvailable?: boolean
+  autoCollect?: boolean; memoryView?: MemoryView
 }
 export interface SearchQuery { query?: string; kind?: Kind; tag?: string; author?: string; from?: string; to?: string; deleted?: boolean; sort?: 'relevance' | 'date' }
 export interface SearchHit extends Note { snippet: string; score: number }
-export interface Snapshot { notes: Note[]; conflicts: Conflict[]; settings: Settings; library: string; status: string; xStatus: string; syncStatus: string; archive: ArchiveProgress; xLoggedIn: boolean; bookmarks: BookmarkGuardInfo }
+export interface Snapshot { notes: Note[]; conflicts: Conflict[]; settings: Settings; library: string; version: string; status: string; xStatus: string; syncStatus: string; archive: ArchiveProgress; xLoggedIn: boolean; xLogin?: { ok: boolean; at: string }; bookmarks: BookmarkGuardInfo; auto: AutoCollectState; partialRetries: Record<string, PartialRetryInfo> }
 export interface Bridge {
   snapshot(): Promise<Snapshot>
   editorDirty(dirty: boolean): void
   recoverUnsaved(note: { id: string; title: string; body: string }): Promise<string>
-  save(note: Partial<Note> & { body: string; title: string; kind: Kind }, expected?: string): Promise<Note>
+  save(note: Partial<Note> & { body: string; title: string; kind: Kind }, expected?: string, options?: { quiet?: boolean }): Promise<Note>
   remove(id: string, restore?: boolean): Promise<void>
   search(query: SearchQuery): Promise<SearchHit[]>
   resolve(id: string, action: 'current' | 'incoming' | 'both' | 'merge', body?: string): Promise<void>
@@ -62,9 +72,8 @@ export interface Bridge {
   connectX(): Promise<void>
   showX(): Promise<void>
   disconnectX(): Promise<void>
-  collectUrl(url: string): Promise<{ id: string; result: 'created' | 'updated' | 'unchanged' }>
-  collectBookmarks(limit: 20 | 50 | 100): Promise<BookmarkRunResult>
-  pauseScan(): Promise<void>
+  setAutoCollect(enabled: boolean): Promise<void>
+  recollect(id: string): Promise<{ id: string; result: 'created' | 'updated' | 'unchanged' }>
   sync(): Promise<void>
   checkSync(): Promise<void>
   external(url: string): Promise<void>

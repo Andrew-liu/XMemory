@@ -1,6 +1,6 @@
 {
   "name": "xmemeory",
-  "version": "0.5.1",
+  "version": "0.5.6",
   "private": true,
   "description": "本地优先的 X 灵感、记忆与创作工作区",
   "license": "MIT",
@@ -19,6 +19,7 @@
     "test:recovery": "tsx tests/desktop-recovery.ts",
     "test:clean-exit": "tsx tests/desktop-clean-exit.ts",
     "test:memory": "tsx tests/desktop-memory.ts",
+    "test:themes": "tsx tests/desktop-themes.ts",
     "pack:win": "pnpm build && electron-builder --win --x64",
     "pack:mac": "pnpm build && electron-builder --mac --x64 --arm64"
   },

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, session, Menu, Tray, nativeImage, clipboard, ClipboardItem } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, session, Menu, Tray, nativeImage, clipboard, ClipboardItem, nativeTheme, powerMonitor } from 'electron'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +10,10 @@ import { githubNetworkFetch } from './github-network'
 import { pruneSecrets } from './providers'
 import type { Settings, Snapshot } from '../shared/types'
 import { validDate } from '../shared/calendar'
+import { palettes, themeColors } from '../shared/themes'
 import { XCapture } from './x-capture'
+import { AutoCollector } from './auto-collect'
+import { addRecovery, clearRecoveries, pendingRecoveries } from './recovery'
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 let win: BrowserWindow
@@ -46,13 +49,14 @@ async function ensureSaved() {
 }
 let library: Library
 let capture: XCapture
+let auto: AutoCollector | undefined
 let sync: GithubSync
 let settings: Settings
 let settingsFile: string
 let secretsFile: string
 let secrets: Record<string,string> = {}
 let tick: ReturnType<typeof setInterval>
-const defaults: Settings = { theme: 'system', closeToTray: true, branch: 'main' }
+const defaults: Settings = { theme: 'system', closeToTray: true, branch: 'main', autoCollect: false, memoryView: 'list' }
 const loginItems: { available: boolean; get(): boolean; set(enabled: boolean): void } = process.env.XMEMEORY_TEST_DATA
   ? (() => { let enabled = false; return { available: process.env.XMEMEORY_TEST_AUTOSTART !== 'unavailable', get: () => enabled, set: (value: boolean) => { enabled = value } } })()
   : {
@@ -74,12 +78,43 @@ function saveSecrets(nextSecrets = secrets) {
 async function openLibrary(root: string) {
   if (sync?.running) throw new Error('请等待同步结束后切换资料库')
   const nextLibrary = new Library(root, changed)
-  capture?.pause(); await library?.close()
+  auto?.dispose(); capture?.pause(); await capture?.disconnect().catch(() => {}); await library?.close()
   library = nextLibrary; library.start()
   capture = new XCapture(library, app.getPath('userData'), changed)
+  const owner = capture
+  auto = new AutoCollector({
+    now: () => Date.now(), random: () => Math.random(),
+    setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: timer => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    summary: () => owner.bookmarksSummary(),
+    run: async limit => {
+      const result = await owner.collectBookmarks(limit, { silent: true })
+      if (settings.autoCollect && ['bottom', 'known-streak', 'limit', 'time'].includes(result.stopReason)) await owner.retryIncomplete()
+      return result
+    },
+    finish: async () => { await owner.release() },
+    change: changed
+  })
+  if (settings?.autoCollect) auto.setEnabled(true)
   sync = new GithubSync(library, changed, githubNetworkFetch, () => rendererDirty)
 }
-const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional() })
+const memoryViews = ['list', 'card'] as const
+const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), palette: z.enum(palettes).optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional(), memoryView: z.enum(memoryViews).optional() })
+// Unattended rounds share one Chrome; turning off stops the round and closes Chrome right away.
+async function setAutoCollect(enabled: boolean) {
+  settings = { ...settings, autoCollect: enabled }; persist()
+  auto?.setEnabled(enabled)
+  if (!enabled && auto?.running) { capture.pause(); await capture.disconnect() }
+  changed()
+}
+async function recollect(id: string) {
+  const note = library.notes.get(id)
+  if (!note || note.deleted || note.kind !== 'memory' || !note.source) throw new Error('只有带原文链接的记忆可以重新采集')
+  if (auto?.running || capture.busy) throw new Error('采集中，请等待本轮结束')
+  try { return await capture.collectUrl(note.source) }
+  finally { await capture.release().catch(() => {}) }
+}
+const windowBackground = () => themeColors(settings.palette, settings.theme === 'dark' || (settings.theme !== 'light' && nativeTheme.shouldUseDarkColors)).bg
+const syncWindowBackground = () => { if (win && !win.isDestroyed()) win.setBackgroundColor(windowBackground()) }
 async function copyImageToClipboard(bytes: Buffer, richText = false) {
   const image = nativeImage.createFromBuffer(bytes)
   if (image.isEmpty()) throw new Error('图片无法读取')
@@ -93,15 +128,16 @@ async function copyImageToClipboard(bytes: Buffer, richText = false) {
 async function dispatch(method: string, args: unknown[]) {
   if (method === 'recoverUnsaved') {
     const note = z.object({ id: z.string().max(100), title: z.string().max(400), body: z.string().max(4_000_000) }).parse(args[0])
-    const file = path.join(app.getPath('userData'), 'recovery', `${Date.now()}-${randomUUID()}.md`)
+    const recoveryDir = path.join(app.getPath('userData'), 'recovery')
+    const file = path.join(recoveryDir, `${Date.now()}-${randomUUID()}.md`)
     atomic(file, `# ${note.title.replace(/[\r\n]/g, ' ')}\n\n${note.body}`)
-    atomic(path.join(app.getPath('userData'), 'recovery-notice.json'), JSON.stringify({ file }))
+    addRecovery(path.join(app.getPath('userData'), 'recovery-notice.json'), recoveryDir, file)
     return file
   }
-  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, settings: { ...settings, hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github), openAtLogin: loginItems.get(), openAtLoginAvailable: loginItems.available }, status: library.errors.join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn, bookmarks: capture.bookmarksSummary() } satisfies Snapshot
+  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, version: app.getVersion(), settings: { ...settings, hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github), openAtLogin: loginItems.get(), openAtLoginAvailable: loginItems.available }, status: library.errors.join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn, xLogin: capture.loginRecord, bookmarks: capture.bookmarksSummary(), auto: auto?.state || { enabled: false, active: false }, partialRetries: capture.retryInfo() } satisfies Snapshot
   if (method === 'save') {
     const note = z.object({ id: z.string().optional(), kind: z.enum(['inspiration','memory','draft','topic']), title: z.string().max(400), body: z.string().max(4_000_000), tags: z.array(z.string()).max(50).optional(), groupId: z.string().optional(), parentId: z.string().optional(), scheduledDate: z.string().refine(validDate).optional(), completed: z.boolean().optional(), author: z.string().max(80).optional(), source: z.string().max(500).optional(), publishedAt: z.iso.datetime().optional(), sortOrder: z.number().int().min(0).optional(), partial: z.boolean().optional(), capturedImages: z.array(z.string().max(500)).max(40).optional() }).parse(args[0])
-    return library.save(note, z.string().optional().parse(args[1]))
+    return library.save(note, z.string().optional().parse(args[1]), z.object({ quiet: z.boolean().optional() }).optional().parse(args[2]))
   }
   if (method === 'remove') return library.remove(z.string().parse(args[0]), z.boolean().optional().parse(args[1]))
   if (method === 'search') return library.search(z.object({ query: z.string().max(1000).optional(), kind: z.enum(['inspiration','memory','draft','topic']).optional(), tag: z.string().optional(), author: z.string().optional(), from: z.string().optional(), to: z.string().optional(), deleted: z.boolean().optional(), sort: z.enum(['relevance','date']).optional() }).parse(args[0]))
@@ -145,15 +181,15 @@ async function dispatch(method: string, args: unknown[]) {
     if (secret?.githubKey !== undefined) nextSecrets.github = normalizeGithubToken(secret.githubKey)
     if (secret?.githubKey !== undefined) saveSecrets(nextSecrets)
     settings = { ...settings, ...next, ...(secret?.githubKey !== undefined ? { githubTokenSavedAt: new Date().toISOString() } : {}) }; persist()
+    if (next.theme !== undefined || next.palette !== undefined) syncWindowBackground()
     changed(); return
   }
   if (method === 'loginX') return capture.login()
   if (method === 'connectX') return capture.checkLogin()
   if (method === 'showX') return capture.showWindow()
   if (method === 'disconnectX') return capture.disconnect()
-  if (method === 'collectUrl') return capture.collectUrl(z.string().max(2000).parse(args[0]))
-  if (method === 'collectBookmarks') return capture.collectBookmarks(z.union([z.literal(20), z.literal(50), z.literal(100)]).parse(args[0]))
-  if (method === 'pauseScan') return capture.pause()
+  if (method === 'setAutoCollect') return setAutoCollect(z.boolean().parse(args[0]))
+  if (method === 'recollect') return recollect(z.string().max(200).parse(args[0]))
   if (method === 'sync') return sync.run(settings.repo || '', settings.branch, secrets.github || '')
   if (method === 'checkSync') return sync.check(settings.repo || '', settings.branch, secrets.github || '')
   if (method === 'setOpenAtLogin') {
@@ -178,6 +214,9 @@ app.whenReady().then(async () => {
   const stored: Record<string, unknown> = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile,'utf8')) : {}
   for (const legacy of ['scanMinutes', 'collect', 'cookieDirectory', 'providers', 'activeProvider']) delete stored[legacy]
   settings = { ...defaults, ...stored }
+  if (settings.palette !== undefined && !(palettes as readonly string[]).includes(settings.palette)) delete settings.palette
+  if (typeof settings.autoCollect !== 'boolean') settings.autoCollect = false
+  if (!(memoryViews as readonly unknown[]).includes(settings.memoryView)) settings.memoryView = 'list'
   if (existsSync(secretsFile)) { try { secrets = JSON.parse(safeStorage.decryptString(readFileSync(secretsFile))) } catch { secrets = {} } }
   if (pruneSecrets(secrets)) { try { saveSecrets() } catch { /* Retry on the next launch. */ } }
   if (!settings.legacyXCleanedAt) {
@@ -191,8 +230,10 @@ app.whenReady().then(async () => {
   await openLibrary(existsSync(rootFile) ? JSON.parse(readFileSync(rootFile, 'utf8')) : path.join(app.getPath('userData'), 'library'))
   await capture.restore()
   persist()
+  powerMonitor.on('resume', () => auto?.resume())
   const startHidden = process.argv.includes('--hidden') || (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin)
-  win = new BrowserWindow({ width: 1360, height: 900, minWidth: 960, minHeight: 640, title: 'XMemeory', backgroundColor: '#f7f8fa', titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', show: !startHidden, webPreferences: { preload: path.join(dir, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  win = new BrowserWindow({ width: 1360, height: 900, minWidth: 960, minHeight: 640, title: 'XMemeory', backgroundColor: windowBackground(), titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', show: !startHidden, webPreferences: { preload: path.join(dir, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  nativeTheme.on('updated', syncWindowBackground)
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', e => e.preventDefault())
   ipcMain.on('xm:dirty', (event, dirty) => { if (event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame && typeof dirty === 'boolean') rendererDirty = dirty })
@@ -203,7 +244,17 @@ app.whenReady().then(async () => {
   if (process.env.ELECTRON_RENDERER_URL) await win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else await win.loadFile(path.join(dir, '../renderer/index.html'))
   const recoveryNotice = path.join(app.getPath('userData'), 'recovery-notice.json')
-  const showRecoveryNotice = () => { if (existsSync(recoveryNotice)) void dialog.showMessageBox(win, { type: 'info', message: '发现此前另存的未保存正文', detail: `恢复副本目录：${path.join(app.getPath('userData'), 'recovery')}`, buttons: ['稍后处理', '打开恢复目录'] }).then(result => { if (result.response === 1) void shell.openPath(path.join(app.getPath('userData'), 'recovery')) }) }
+  const recoveryDir = path.join(app.getPath('userData'), 'recovery')
+  const showRecoveryNotice = () => {
+    const files = pendingRecoveries(recoveryNotice, recoveryDir)
+    if (!files.length) return
+    const names = files.slice(-3).map(file => `· ${path.basename(file)}`).join('\n')
+    void dialog.showMessageBox(win, { type: 'info', message: `发现 ${files.length} 份此前另存的未保存正文`, detail: `${names}${files.length > 3 ? '\n…' : ''}\n\n恢复副本目录：${recoveryDir}\n确认内容已找回后，可选择“已处理，不再提醒”。`, buttons: ['稍后处理', '打开恢复副本', '打开恢复目录', '已处理，不再提醒'], defaultId: 1, cancelId: 0 }).then(result => {
+      if (result.response === 1) void shell.openPath(files.at(-1)!)
+      if (result.response === 2) void shell.openPath(recoveryDir)
+      if (result.response === 3) clearRecoveries(recoveryNotice)
+    })
+  }
   if (startHidden) win.once('show', showRecoveryNotice)
   else showRecoveryNotice()
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'XMemeory', submenu: [{ label: '显示窗口', click: () => win.show() }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }]))
@@ -237,7 +288,7 @@ app.on('before-quit', e => {
   void (async () => {
     await ensureSaved()
     if (sync?.running) throw new Error('正在同步，请同步完成后退出')
-    capture?.pause(); clearInterval(tick)
+    auto?.dispose(); capture?.pause(); clearInterval(tick)
     await capture?.shutdown()
     // The OS closes SQLite after exit. In-flight archive requests may still finish before exit.
     quitting = true; app.quit()

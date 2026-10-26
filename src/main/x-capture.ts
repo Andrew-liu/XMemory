@@ -5,7 +5,9 @@ import { chromium, type Browser, type BrowserContext, type Page, type Response }
 import type { ArchiveProgress, BookmarkGuardInfo, BookmarkRunResult } from '../shared/types'
 import { bookmarkStopText } from '../shared/bookmarks'
 import { atomic, Library } from './library'
-import { BookmarkScanner, bookmarkSummary, RiskGuard } from './x-bookmarks'
+import { BookmarkScanner, bookmarkSummary, RiskGuard, DAILY_ARTICLES, DAILY_NEW } from './x-bookmarks'
+import { XLoginRequired } from './auto-collect'
+import { PartialRetries, mergeCapturedSource, sourceHash } from './partial-retry'
 import {
   allowedImage, articleDomMarkdown, captureFromPayload, imageCandidates, isArticleLink,
   mergeArticleDomBlocks, memoryTitle, normalizePostUrl, updatedCaptureBody,
@@ -23,7 +25,50 @@ export function chromeArgs(profile: string, mode: 'login' | 'cdp') {
   ]
   return mode === 'login'
     ? [...common, '--window-position=80,80', X_LOGIN_URL]
-    : [...common, '--window-position=-10000,40', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', 'about:blank']
+    : [...common, '--no-startup-window', '--window-position=-10000,40', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0']
+}
+
+// Creating a tab via context.newPage() maps to Target.createTarget without `background`,
+// which lets Chrome activate its window. All capture tabs go through this CDP helper and
+// deliberately fail rather than falling back to a foreground tab.
+export async function createBackgroundPage(context: BrowserContext): Promise<Page> {
+  const browser = context.browser()
+  if (!browser) throw new Error('未取得 Chrome 浏览器，无法创建后台采集页')
+  const session = await browser.newBrowserCDPSession()
+  let targetId: string | undefined
+  try {
+    const existing = context.pages().find(page => !page.isClosed())
+    let browserContextId: string | undefined
+    if (existing) {
+      const pageSession = await context.newCDPSession(existing)
+      try { browserContextId = (await pageSession.send('Target.getTargetInfo')).targetInfo.browserContextId }
+      finally { await pageSession.detach().catch(() => {}) }
+    }
+    const target = await session.send('Target.createTarget', {
+      url: 'about:blank', background: true, focus: false,
+      ...(browserContextId ? { browserContextId } : {}),
+      ...(!existing ? { newWindow: true, left: -10000, top: 40, width: 1200, height: 900 } : {})
+    })
+    targetId = target.targetId
+    const checked = new Set<Page>()
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      for (const page of context.pages()) {
+        if (page.isClosed() || checked.has(page)) continue
+        const pageSession = await context.newCDPSession(page)
+        try {
+          const { targetInfo } = await pageSession.send('Target.getTargetInfo')
+          if (targetInfo.targetId === targetId) return page
+          checked.add(page)
+        } finally { await pageSession.detach().catch(() => {}) }
+      }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    throw new Error('10 秒内未取得后台采集页，请重试或检查 Chrome 版本')
+  } catch (error) {
+    if (targetId) await session.send('Target.closeTarget', { targetId }).catch(() => {})
+    throw error
+  } finally { await session.detach().catch(() => {}) }
 }
 
 // Navigation uses Chrome's own network stack, including its system proxy.
@@ -33,7 +78,7 @@ export async function downloadChromeImage(context: BrowserContext, url: string):
     try { const parsed = new URL(value); return allowedImage(value) && !parsed.username && !parsed.password && !parsed.port } catch { return false }
   }
   if (!valid(url)) throw new Error('图片地址不在允许范围')
-  const page = await context.newPage()
+  const page = await createBackgroundPage(context)
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     await page.route('**/*', route => valid(route.request().url()) ? route.fallback() : route.abort())
@@ -89,9 +134,10 @@ function accountFromCookies(cookies: Array<{ name: string; value: string }>) {
 const isTimeout = (error: unknown) => error instanceof Error && error.name === 'TimeoutError'
 
 export class XCapture {
-  status = '粘贴 X 推文或长文链接即可采集'
+  status = '尚未连接 Chrome 专属 Profile'
   progress: ArchiveProgress = { phase: 'idle', found: 0, saved: 0, imagesDone: 0, imagesFailed: 0 }
   loggedIn = false
+  loginRecord?: { ok: boolean; at: string }
   private process?: ChildProcess
   private loginProcess?: ChildProcess
   private browser?: Browser
@@ -101,14 +147,20 @@ export class XCapture {
   private flowActive = false
   private bookmarksActive = false
   private stopped = false
+  private shown = false
+  private partialRetries: PartialRetries
 
-  constructor(private library: Library, private userData: string, private change: () => void) {}
+  constructor(private library: Library, private userData: string, private change: () => void) {
+    this.partialRetries = new PartialRetries(library.root, new Date(), userData)
+  }
 
   private set(status: string, extra: Partial<ArchiveProgress> = {}) {
     this.status = status
     this.progress = { ...this.progress, ...extra }
     this.change()
   }
+
+  get busy() { return this.flowActive || this.running }
 
   private async start() {
     if (this.browser?.isConnected() && this.context) return this.context
@@ -123,7 +175,7 @@ export class XCapture {
     this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`)
     this.context = this.browser.contexts()[0]
     if (!this.context) throw new Error('未取得 Chrome Profile 上下文')
-    this.page = this.context.pages()[0] || await this.context.newPage()
+    this.page = this.context.pages().find(page => !page.isClosed()) || await createBackgroundPage(this.context)
     return this.context
   }
 
@@ -131,13 +183,20 @@ export class XCapture {
     const context = await this.start()
     const cookies = await context.cookies('https://x.com')
     this.loggedIn = cookies.some(cookie => cookie.name === 'auth_token')
+    this.loginRecord = { ok: this.loggedIn, at: new Date().toISOString() }
+    try { atomic(path.join(this.userData, 'x-login.json'), JSON.stringify(this.loginRecord)) } catch { /* Status line only. */ }
     return this.loggedIn
   }
 
   async restore() {
     const profile = path.join(this.userData, 'x-cdp-profile')
     this.loggedIn = false
-    this.set(existsSync(profile) ? '已找到 Chrome 专属 Profile；点击“检查登录”联网确认' : '请先在 Chrome 中登录 X，再粘贴链接采集')
+    try {
+      const saved = JSON.parse(readFileSync(path.join(this.userData, 'x-login.json'), 'utf8'))
+      if (typeof saved?.ok === 'boolean' && typeof saved?.at === 'string' && !Number.isNaN(Date.parse(saved.at))) this.loginRecord = { ok: saved.ok, at: saved.at }
+    } catch { this.loginRecord = undefined }
+    if (!existsSync(profile)) this.loginRecord = undefined
+    this.set(existsSync(profile) ? '已找到 Chrome 专属 Profile；点击“检查登录”联网确认' : '请先点击“登录 X”完成登录')
   }
 
   private async placeWindow(left: number) {
@@ -149,9 +208,18 @@ export class XCapture {
     } finally { await session.detach().catch(() => {}) }
   }
 
-  private async hideWindow() { await this.placeWindow(-10000) }
+  // Bounds only: setting windowState here would activate the Chrome window and steal focus.
+  private async hideWindow() {
+    if (!this.page) return
+    const session = await this.page.context().newCDPSession(this.page)
+    try {
+      const { windowId } = await session.send('Browser.getWindowForTarget')
+      await session.send('Browser.setWindowBounds', { windowId, bounds: { left: -10000, top: 40, width: 1200, height: 900 } })
+    } finally { await session.detach().catch(() => {}) }
+  }
   async showWindow() {
     await this.start()
+    this.shown = true
     await this.placeWindow(80)
     await this.page?.bringToFront()
     this.set('已显示 Chrome；可检查登录状态或处理 X 验证')
@@ -160,9 +228,10 @@ export class XCapture {
   async checkLogin() {
     await this.start()
     const ready = await this.refreshLogin()
-    this.set(ready ? 'Chrome 专属 Profile 登录有效；可粘贴链接采集' : 'Chrome 专属 Profile 尚未登录，请点击采集后完成登录')
+    this.set(ready ? 'Chrome 专属 Profile 登录有效；可自动采集书签' : 'Chrome 专属 Profile 尚未登录，请点击“登录 X”完成登录')
     if (ready) await this.hideWindow().catch(() => {})
     else {
+      this.shown = true
       await this.placeWindow(80)
       await this.page?.bringToFront()
     }
@@ -185,7 +254,7 @@ export class XCapture {
     })
     this.loginProcess = undefined
     if (this.stopped) throw new Error('登录流程已暂停')
-    this.set('Chrome 已关闭；可检查登录或直接采集', { phase: 'idle' })
+    this.set('Chrome 已关闭；可点击“检查登录”确认登录状态', { phase: 'idle' })
   }
 
   async collectUrl(input: string): Promise<{ id: string; result: 'created' | 'updated' | 'unchanged' }> {
@@ -200,15 +269,20 @@ export class XCapture {
     } finally { this.flowActive = false }
   }
 
-  private async ensureReady() {
+  private async ensureReady(silent = false) {
+    this.shown = false
     let ready = false
     try { ready = await this.refreshLogin() } catch { ready = false }
+    if (!ready && silent) {
+      this.set('未检测到有效 X 登录，自动采集已跳过', { phase: 'idle' })
+      throw new XLoginRequired()
+    }
     if (!ready) {
       await this.login()
       ready = await this.refreshLogin()
     }
     if (!ready) {
-      this.set('未检测到有效 X 登录，请重新点击采集并完成登录', { phase: 'idle' })
+      this.set('未检测到有效 X 登录，请在设置页完成登录后重试', { phase: 'idle' })
       throw new Error('未检测到有效 X 登录，未开始采集')
     }
     await this.hideWindow().catch(() => {})
@@ -280,9 +354,9 @@ export class XCapture {
     return { markdown, downloaded, failed, replacements, failures }
   }
 
-  private async collectOne(url: string, id: string, account: string, detailPage?: Page, discoveredVia?: 'bookmarks') {
+  private async collectOne(url: string, id: string, account: string, detailPage?: Page, discoveredVia?: 'bookmarks', expectedSourceHash?: string) {
     const user = normalizePostUrl(url)?.user
-    const page = detailPage || this.page || await (await this.start()).newPage()
+    const page = detailPage || (this.page && !this.page.isClosed() ? this.page : await createBackgroundPage(await this.start()))
     if (!detailPage) this.page = page
     let captured: CapturedTarget | undefined
     const onResponse = async (response: Response) => {
@@ -298,7 +372,6 @@ export class XCapture {
         throw new Error(isTimeout(error) ? '打开推文页面失败：超时' : '打开推文页面失败：网络错误')
       })
       if (/\/i\/flow\/login|\/account\/access/.test(page.url())) throw new Error('X 要求重新登录或安全验证，采集已停止')
-      await this.placeWindow(-1600).catch(() => {})
       await page.waitForTimeout(3500)
       for (let index = 0; index < 4; index++) {
         await page.mouse.wheel(0, 560 + Math.floor(Math.random() * 220))
@@ -465,13 +538,20 @@ export class XCapture {
       page.off('response', onResponse)
     }
     if (!captured) throw new Error(`未能从页面响应或正文容器取得 ${id} 的正文，未写入空记录`)
-    return this.persistCaptured(captured, account, discoveredVia)
+    return this.persistCaptured(captured, account, discoveredVia, expectedSourceHash)
   }
 
-  private async persistCaptured(captured: CapturedTarget, account: string, discoveredVia?: 'bookmarks') {
-    const localized = await this.localizeImages(captured, account)
+  private async persistCaptured(captured: CapturedTarget, account: string, discoveredVia?: 'bookmarks', expectedSourceHash?: string) {
+    if (expectedSourceHash && this.stopped) throw new Error('补采已暂停')
+    const localized = expectedSourceHash && captured.post.partial
+      ? { markdown: captured.markdown, downloaded: [] as string[], failed: 0, replacements: {} as Record<string, string>, failures: [] as string[] }
+      : await this.localizeImages(captured, account)
+    if (expectedSourceHash && this.stopped) throw new Error('补采已暂停')
     const noteId = `x-${account}-${captured.post.id}`
     const existing = this.library.notes.get(noteId)
+    const captureFile = path.join(this.library.root, 'metadata', `${noteId}.capture.json`)
+    let previousHash: string | undefined
+    try { previousHash = JSON.parse(readFileSync(captureFile, 'utf8')).sourceHash } catch { /* Legacy capture. */ }
     const title = memoryTitle(captured.post, captured.articleTitle)
     let result: 'created' | 'updated' | 'unchanged' = 'unchanged'
     if (!existing) {
@@ -480,10 +560,14 @@ export class XCapture {
     } else {
       const publishedChanged = !!captured.post.publishedAt && existing.publishedAt !== captured.post.publishedAt
       const upgrade = existing.partial === true && !captured.post.partial
-      const nextBody = updatedCaptureBody(existing, captured.markdown, localized.markdown, localized.replacements, captured.post.partial)
+      const merged = expectedSourceHash && !captured.post.partial
+        ? mergeCapturedSource(existing.body, localized.markdown, expectedSourceHash) : undefined
+      const nextBody = expectedSourceHash
+        ? merged || existing.body
+        : updatedCaptureBody(existing, captured.markdown, localized.markdown, localized.replacements, captured.post.partial)
       if (nextBody !== existing.body || (!existing.userEdited && (captured.markdown.length >= existing.body.length || upgrade))) {
         const capturedImages = [...new Set([...(existing.capturedImages || []), ...localized.downloaded])]
-        const replaced = nextBody === localized.markdown
+        const replaced = expectedSourceHash ? !!merged : nextBody === localized.markdown
         const nextPartial = replaced ? captured.post.partial : existing.partial
         if (existing.body !== nextBody || existing.partial !== nextPartial || capturedImages.length !== (existing.capturedImages || []).length || publishedChanged) {
           this.library.save({ ...existing, body: nextBody, publishedAt: captured.post.publishedAt || existing.publishedAt, partial: nextPartial, capturedImages }, existing.hash)
@@ -494,7 +578,10 @@ export class XCapture {
         result = 'updated'
       }
     }
-    atomic(path.join(this.library.root, 'metadata', `${noteId}.capture.json`), JSON.stringify({ ...captured.structured, discoveredVia, publishedAt: captured.post.publishedAt, attachmentStatus: localized.failed ? localized.downloaded.length ? 'partial' : 'remote-only' : localized.downloaded.length ? 'complete' : 'none', localImages: localized.replacements, imageErrors: localized.failures, capturedAt: new Date().toISOString() }, null, 2))
+    const persistedHash = sourceHash(this.library.notes.get(noteId)?.body || '')
+    const capturedHash = sourceHash(localized.markdown)
+    const baseline = persistedHash === capturedHash ? persistedHash : previousHash || expectedSourceHash
+    atomic(captureFile, JSON.stringify({ ...captured.structured, discoveredVia, publishedAt: captured.post.publishedAt, attachmentStatus: localized.failed ? localized.downloaded.length ? 'partial' : 'remote-only' : localized.downloaded.length ? 'complete' : 'none', localImages: localized.replacements, imageErrors: localized.failures, capturedAt: new Date().toISOString(), sourceHash: baseline }, null, 2))
     return { result, noteId, title }
   }
 
@@ -509,7 +596,49 @@ export class XCapture {
 
   bookmarksSummary(): BookmarkGuardInfo { return bookmarkSummary(this.library.root) }
 
-  async collectBookmarks(limit: 20 | 50 | 100): Promise<BookmarkRunResult> {
+  retryInfo() { return this.partialRetries.info(this.library.notes.values()) }
+
+  async retryIncomplete() {
+    if (this.busy || this.stopped || !this.context || !this.browser?.isConnected()) return
+    this.flowActive = true
+    try {
+      const account = accountFromCookies(await this.context.cookies('https://x.com'))
+      const guard = new RiskGuard(this.library.root, account)
+      guard.canStart(new Date())
+      if (guard.state.articlesToday >= DAILY_ARTICLES || guard.state.newToday >= DAILY_NEW || this.stopped) return
+      const candidate = this.partialRetries.select(this.library.notes.values(), account, new Date())
+      this.change()
+      if (!candidate) return
+      if (!await this.refreshLogin() || this.stopped) return
+      this.partialRetries.begin(candidate.note.id, new Date())
+      guard.state.articlesToday++
+      guard.save()
+      this.set(`正在补采不完整记忆：${candidate.note.id}`, { phase: 'collecting', mode: 'single' })
+      try {
+        const target = normalizePostUrl(candidate.note.source!)
+        if (!target) throw new Error('原文链接无效')
+        await this.collectOne(target.url, target.id, account, undefined, undefined, candidate.expected)
+        const current = this.library.notes.get(candidate.note.id)
+        const completed = current?.partial === false
+        const review = !!current?.partial && sourceHash(current.body) !== candidate.expected
+        this.partialRetries.finish(candidate.note.id, completed ? 'complete' : review ? 'review' : 'incomplete')
+        this.set(completed ? '不完整记忆已补采完整' : review ? '记忆原文有变化，需要手动对照' : '补采后正文仍不完整，请稍后重试', { phase: completed ? 'complete' : 'partial' })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        if (/429|限流/.test(message)) guard.setBreaker('rate-limit', new Date(), new Date(Date.now() + 2 * 60 * 60_000))
+        const reason = /登录|验证/.test(message) ? 'login' : /429|限流/.test(message) ? 'rate-limit' : /超时|网络/.test(message) ? 'network' : 'capture-error'
+        this.partialRetries.finish(candidate.note.id, 'error', reason)
+        this.set(`不完整记忆补采失败：${reason === 'login' ? '请重新登录 X' : reason === 'rate-limit' ? 'X 限流中' : '请稍后重试'}`, { phase: 'partial' })
+      }
+    } finally {
+      this.flowActive = false
+      this.change()
+    }
+  }
+
+  async collectBookmarks(limit: number, options: { silent?: boolean } = {}): Promise<BookmarkRunResult> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('单轮上限需为 1～100 条')
+    const silent = options.silent === true
     if (this.flowActive || this.running) throw new Error('登录或采集流程正在进行中')
     this.flowActive = true
     this.bookmarksActive = true
@@ -517,14 +646,15 @@ export class XCapture {
     let listPage: Page | undefined
     let guard: RiskGuard | undefined
     try {
-      await this.ensureReady()
+      await this.ensureReady(silent)
       const context = await this.start()
       const account = accountFromCookies(await context.cookies('https://x.com'))
       guard = new RiskGuard(this.library.root, account)
       guard.canStart(new Date())
       this.progress.imagesDone = 0
       this.progress.imagesFailed = 0
-      const detailPage = () => this.page
+      this.progress = { ...this.progress, mode: 'bookmarks', checked: 0, saved: 0, skipped: 0, failed: 0, queued: 0 }
+      const detailPage = () => this.page && !this.page.isClosed() ? this.page : undefined
       const scanner = new BookmarkScanner(guard, {
         isKnown: id => this.library.notes.has(`x-${account}-${id}`),
         saveDirect: async (tweet, id) => {
@@ -533,14 +663,12 @@ export class XCapture {
           return (await this.persistCaptured(captured, account, 'bookmarks')).result
         },
         collectDetail: async (id, url) => {
-          const page = detailPage() || await context.newPage()
+          const page = detailPage() || await createBackgroundPage(context)
           this.page = page
-          await page.bringToFront().catch(() => {})
           return (await this.collectOne(url, id, account, page, 'bookmarks')).result
         },
         scroll: async () => {
           if (!listPage) return { moved: false, atEnd: false }
-          await listPage.bringToFront().catch(() => {})
           return listPage.evaluate(d => {
             const before = window.scrollY
             window.scrollBy({ top: d, behavior: 'auto' })
@@ -554,7 +682,7 @@ export class XCapture {
         stopped: () => this.stopped,
         progress: p => this.set(`已检查 ${p.checked} · 新增 ${p.created} · 已存在 ${p.skipped} · 长文队列 ${p.queued} · 失败 ${p.failed}`, { phase: 'collecting', mode: 'bookmarks', checked: p.checked, saved: p.created, skipped: p.skipped, failed: p.failed, queued: p.queued })
       })
-      listPage = await context.newPage()
+      listPage = await createBackgroundPage(context)
       const onResponse = (response: Response) => {
         if (!/\/graphql\/[\w-]+\/Bookmarks(?:\?|$)/.test(response.url())) return
         void (async () => {
@@ -572,7 +700,7 @@ export class XCapture {
         const result = await scanner.run(limit)
         const text = `书签采集结束（${bookmarkStopText(result.stopReason)}）：新增 ${result.created} · 已存在 ${result.skipped} · 失败 ${result.failed}`
         this.set(text, { phase: result.stopReason === 'paused' ? 'paused' : result.stopReason.startsWith('breaker:') ? 'partial' : 'complete', checked: result.checked, saved: result.created, skipped: result.skipped, failed: result.failed, queued: result.articlesQueued })
-        if (result.stopReason === 'breaker:auth') {
+        if (result.stopReason === 'breaker:auth' && !silent) {
           await this.placeWindow(80).catch(() => {})
           await this.page?.bringToFront().catch(() => {})
         }
@@ -583,7 +711,7 @@ export class XCapture {
     } catch (error) {
       const message = error instanceof Error ? error.message : '书签采集失败'
       this.set(message, { phase: this.stopped ? 'paused' : 'partial' })
-      if (/登录|验证/.test(message)) {
+      if (/登录|验证/.test(message) && !silent) {
         await this.placeWindow(80).catch(() => {})
         await this.page?.bringToFront().catch(() => {})
       }
@@ -602,17 +730,31 @@ export class XCapture {
     this.set('采集已暂停', { phase: 'paused' })
   }
 
-  async disconnect() {
-    this.stopped = true
-    this.loggedIn = false
-    if (this.loginProcess && this.loginProcess.exitCode === null) this.loginProcess.kill()
-    this.loginProcess = undefined
+  private async closeChrome() {
+    this.shown = false
     await this.browser?.close().catch(() => {})
     this.browser = undefined
     this.context = undefined
     this.page = undefined
     if (this.process && this.process.exitCode === null) this.process.kill()
     this.process = undefined
+  }
+
+  /** Close the per-round Chrome unless a flow is running or the user showed it this round. Keeps login state and status. */
+  async release() {
+    if (this.busy || this.shown || this.loginProcess) return false
+    if (!this.browser && !this.process) return true
+    await this.closeChrome()
+    this.change()
+    return true
+  }
+
+  async disconnect() {
+    this.stopped = true
+    this.loggedIn = false
+    if (this.loginProcess && this.loginProcess.exitCode === null) this.loginProcess.kill()
+    this.loginProcess = undefined
+    await this.closeChrome()
     this.set('已关闭 CDP Chrome；专属 Profile 登录态仍保留', { phase: 'idle' })
   }
 

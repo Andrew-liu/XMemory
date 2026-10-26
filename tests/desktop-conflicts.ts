@@ -31,8 +31,9 @@ try {
       writeFileSync(path.join(snapshot.library, 'conflicts', `${chained.id}.json`), JSON.stringify(chained))
     }
   }
-  // Saving a separate synthetic note refreshes the library, including conflict files.
-  await page.evaluate(() => window.xm.save({ kind: 'inspiration', title: '刷新测试', body: '' }))
+  // An externally added Markdown file triggers a full library refresh, including conflict files.
+  // (Editor saves are incremental since v0.5.5 and no longer rescan the library.)
+  writeFileSync(path.join(snapshot.library, 'inspirations', 'refresh-trigger.md'), '---\nxmemeory_id: refresh-trigger\ntype: inspiration\ntitle: 刷新测试\n---\n')
   await page.getByRole('button', { name: /待处理冲突/ }).click()
   await expect(page.locator('.conflict-card')).toHaveCount(3)
   const fields = page.locator('.conflict-card').filter({ has: page.getByRole('heading', { name: '字段差异', exact: true }) })

@@ -6,7 +6,7 @@ const root = path.resolve('../../trash/xmemeory-dev/source-image')
 mkdirSync(root, { recursive: true })
 const env: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), XMEMEORY_TEST_DATA: mkdtempSync(path.join(root, 'profile-')) }
 delete env.ELECTRON_RUN_AS_NODE
-const app = await electron.launch({ args: ['.'], env })
+const app = await electron.launch({ ...(process.env.XMEMEORY_TEST_EXE ? { executablePath: process.env.XMEMEORY_TEST_EXE, args: [] } : { args: ['.'] }), env })
 try {
   const page = await app.firstWindow()
   page.setDefaultTimeout(10000)

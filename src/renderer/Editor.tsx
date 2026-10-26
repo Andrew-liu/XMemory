@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
@@ -38,6 +38,9 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
     if (!preview && dialog.open) dialog.close()
   }, [preview])
   const data = useRef({ note, title: note.title, body: note.body, dirty: false, busy: false })
+  const sentDirty = useRef<boolean | null>(null)
+  // Sending the dirty flag on every keystroke is redundant IPC; only report transitions.
+  const markDirty = (dirty: boolean, force = false) => { if (!force && sentDirty.current === dirty) return; sentDirty.current = dirty; window.xm.editorDirty(dirty) }
   const notesRef = useRef(notes); notesRef.current = notes
   const saveChain = useRef(Promise.resolve())
   const input = useRef<HTMLInputElement>(null)
@@ -49,7 +52,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
       const snapshot = { ...d.note, title: d.title, body: d.body }
       setStatus('保存中…')
       let result: Note
-      try { result = await window.xm.save(snapshot, d.note.hash) }
+      try { result = await window.xm.save(snapshot, d.note.hash, { quiet: true }) }
       catch (cause) {
         const message = cause instanceof Error ? cause.message : '保存失败'
         if (message === '检测到外部修改，已保留双方。请在“冲突”中处理。') {
@@ -58,14 +61,14 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
             d.note = current; d.title = current.title; d.body = current.body; d.dirty = false
             setTitle(current.title); setBody(current.body)
             editor?.commands.setContent(prepareMarkdown(current.body), { contentType: 'markdown', emitUpdate: false })
-            window.xm.editorDirty(false); saved(current); setStatus('已保留双方 · 请处理冲突')
+            markDirty(false); saved(current); setStatus('已保留双方 · 请处理冲突')
           }
         }
         throw cause
       }
       d.note = result
       if (d.title === snapshot.title && d.body === snapshot.body) d.dirty = false
-      window.xm.editorDirty(d.dirty)
+      markDirty(d.dirty)
       saved(result); setStatus(d.dirty ? '等待保存…' : '已保存到本地')
     }
     saveChain.current = saveChain.current.catch(() => {}).then(work)
@@ -73,10 +76,10 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
   }
   useImperativeHandle(ref, () => ({ flush, recover: async () => {
     const d = data.current
-    if (d.dirty) { await window.xm.recoverUnsaved({ id: d.note.id, title: d.title, body: d.body }); setStatus('未保存正文已另存恢复副本'); window.xm.editorDirty(false) }
+    if (d.dirty) { await window.xm.recoverUnsaved({ id: d.note.id, title: d.title, body: d.body }); setStatus('未保存正文已另存恢复副本'); markDirty(false) }
   } }))
-  useEffect(() => { window.xm.editorDirty(false); return () => window.xm.editorDirty(false) }, [note.id])
-  const update = (value: string) => { if (value === data.current.body) return; data.current.body = value; data.current.dirty = true; window.xm.editorDirty(true); setBody(value); setStatus('等待保存…') }
+  useEffect(() => { markDirty(false, true); return () => markDirty(false, true) }, [note.id])
+  const update = (value: string) => { if (value === data.current.body) return; data.current.body = value; data.current.dirty = true; markDirty(true); setBody(value); setStatus('等待保存…') }
   const importFiles = async (files: File[]) => {
     const images: { relative: string; name: string }[] = []
     for (const file of files) {
@@ -215,6 +218,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
     })
     return () => cancelAnimationFrame(frame)
   }, [searchLocation, editor, source])
+  const backlinks = useMemo(() => notes.filter(n => n.id !== note.id && (n.body.includes(`[[${note.title}`) || n.body.includes(`[[${note.path.replace(/\.md$/, '')}`))), [notes, note.id, note.title, note.path])
   const command = (fn: () => void) => { if (source) { editor?.commands.setContent(prepareMarkdown(body), { contentType: 'markdown', emitUpdate: false }); setSource(false) }; fn(); editor?.commands.focus() }
   const toggle = () => { if (source) editor?.commands.setContent(prepareMarkdown(body), { contentType: 'markdown', emitUpdate: false }); setSource(!source) }
   return <section className="document">
@@ -226,7 +230,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
       </div>}
     </dialog>
     <header className="document-top"><span className="eyebrow">{note.kind === 'memory' ? '记忆档案' : note.kind === 'draft' ? '候选稿' : note.kind === 'topic' ? '长文选题' : '灵感笔记'}</span><span className="save-status"><i />{status}</span><button title="导出 Markdown 和图片" onClick={() => { void flush().then(() => window.xm.exportNote(note.id)).catch(e => error(e.message)) }}><ArrowDownToLine size={16}/></button></header>
-    <input className="document-title" aria-label="标题" placeholder={note.kind === 'topic' ? '给长文起个标题' : '给灵感起个名字'} value={title} onChange={e => { setTitle(e.target.value); data.current.title = e.target.value; data.current.dirty = true; window.xm.editorDirty(true) }} />
+    <input className="document-title" aria-label="标题" placeholder={note.kind === 'topic' ? '给长文起个标题' : '给灵感起个名字'} value={title} onChange={e => { setTitle(e.target.value); data.current.title = e.target.value; data.current.dirty = true; markDirty(true) }} />
     <div className="doc-meta">{note.kind === 'draft' && <span>{note.generationProvider ? `${note.generationProvider.name} · ${note.generationProvider.model}` : '生成模型未记录'}</span>}<span>{new Date(note.kind === 'memory' ? note.publishedAt || note.createdAt : note.createdAt).toLocaleDateString('zh-CN')}</span><span>{note.tags.join(' · ') || '私人资料库'}</span>{note.source && <button onClick={() => void window.xm.external(note.source!)}>查看原文 ↗</button>}{note.webSources?.map(source => <button key={source.url} title={source.title} onClick={() => void window.xm.external(source.url).catch(e => error(e.message))}>来源 · {source.source} ↗</button>)}</div>
     {locationMessage && <p role="status" className="search-location-status">{locationMessage}</p>}
     <div className="toolbar">
@@ -252,6 +256,6 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
     {linkPicker && <div className="link-picker"><input autoFocus value={linkTerm} onChange={e => setLinkTerm(e.target.value)} placeholder="搜索要链接的笔记"/>{notes.filter(n => !n.deleted && n.title.includes(linkTerm)).slice(0, 8).map(n => <div key={n.id}><span>{n.title}</span><button onClick={() => { editor?.commands.insertContent({ type: 'wiki', attrs: { target: n.path.replace(/\.md$/, ''), label: n.title, embed: false } }); setLinkPicker(false) }}>双链</button><button onClick={() => { editor?.commands.insertContent({ type: 'wiki', attrs: { target: n.path.replace(/\.md$/, ''), label: n.title, embed: true } }); setLinkPicker(false) }}>嵌入</button></div>)}</div>}
     {source ? <textarea ref={sourceInput} className="source-editor" aria-label="Markdown 源码" value={body} onChange={e => update(e.target.value)} spellCheck={false}/> : <EditorContent editor={editor}/>}
     <footer className="document-footer"><span>{body.length} 字符 · Markdown</span><span>{note.path}</span></footer>
-    <div className="backlinks"><span className="eyebrow">反向链接</span>{notes.filter(n => n.id !== note.id && (n.body.includes(`[[${note.title}`) || n.body.includes(`[[${note.path.replace(/\.md$/, '')}`))).map(n => <button key={n.id} onClick={() => open(n.id)}>↗ {n.title}</button>)}</div>
+    <div className="backlinks"><span className="eyebrow">反向链接</span>{backlinks.map(n => <button key={n.id} onClick={() => open(n.id)}>↗ {n.title}</button>)}</div>
   </section>
 })

@@ -6,6 +6,8 @@ import path from 'node:path'
 const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/desktop-recovery')
 mkdirSync(temporary, { recursive: true })
 const userData = mkdtempSync(path.join(temporary, 'profile-'))
+// v0.5.4: a stale notice whose recovery copy no longer exists is dropped at startup.
+writeFileSync(path.join(userData, 'recovery-notice.json'), JSON.stringify({ file: path.join(userData, 'recovery', 'gone.md') }))
 const env: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), XMEMEORY_TEST_DATA: userData }
 delete env.ELECTRON_RUN_AS_NODE
 const args = process.env.XMEMEORY_TEST_EXE ? [] : ['.']
@@ -13,6 +15,7 @@ const app = await electron.launch({ ...(process.env.XMEMEORY_TEST_EXE ? { execut
 try {
   const page = await app.firstWindow()
   await expect(page.getByRole('button', { name: '新灵感', exact: true })).toBeVisible()
+  await expect.poll(() => existsSync(path.join(userData, 'recovery-notice.json'))).toBe(false)
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide())
   const executable = await app.evaluate(() => process.execPath)
   const second = spawn(executable, args, { env, windowsHide: true, stdio: 'ignore' })
@@ -42,5 +45,5 @@ try {
   expect(conflicts).toHaveLength(1)
   expect(conflicts[0].current.body).toContain('外部冲突内容')
   expect(conflicts[0].incoming.body).toContain('窗口中尚未保存的正文')
-  console.log('PASS: 重复启动退出并唤醒已有窗口；保存冲突完整保留双方且不重复生成恢复副本；窗口可正常关闭')
+  console.log('PASS: 失效恢复标记启动即清除；重复启动退出并唤醒已有窗口；保存冲突完整保留双方且不重复生成恢复副本；窗口可正常关闭')
 } finally { await app.close() }

@@ -2,29 +2,76 @@ import { expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import type { BrowserContext } from 'playwright'
-import { chromeArgs, downloadChromeImage, XCapture, X_LOGIN_URL } from '../src/main/x-capture'
+import { chromeArgs, createBackgroundPage, downloadChromeImage, XCapture, X_LOGIN_URL } from '../src/main/x-capture'
+import { BookmarkScanner } from '../src/main/x-bookmarks'
 import { articleDomMarkdown, captureFromPayload, mergeArticleDomBlocks, updatedCaptureBody } from '../src/main/x-parse'
 import { Library } from '../src/main/library'
 
 const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/tests')
 mkdirSync(temporary, { recursive: true })
 
-it('图片通过 Chrome 标签页响应读取并关闭标签页，失败不会报告成功', async () => {
+type FakePage = { targetId: string; closed: boolean; isClosed(): boolean; [key: string]: unknown }
+
+function fakePage(targetId: string, extra: Record<string, unknown> = {}) {
+  const page: FakePage = { targetId, closed: false, isClosed() { return this.closed }, ...extra }
+  return page
+}
+
+function fakeCdpContext(pages: FakePage[], created: FakePage[], options: { onCreate?: (params: Record<string, unknown>) => string; pageExtra?: (targetId: string) => Record<string, unknown> } = {}) {
+  const createCalls: Record<string, unknown>[] = []
+  const closeCalls: Record<string, unknown>[] = []
+  const detach = vi.fn().mockResolvedValue(undefined)
+  const browserSession = {
+    send: vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === 'Target.createTarget') {
+        createCalls.push(params)
+        const targetId = options.onCreate ? options.onCreate(params) : `bg-${created.length}`
+        const page = fakePage(targetId, options.pageExtra?.(targetId))
+        created.push(page)
+        pages.push(page)
+        return { targetId }
+      }
+      if (method === 'Target.closeTarget') { closeCalls.push(params); return {} }
+      return {}
+    }),
+    detach
+  }
+  const context = {
+    newPage: vi.fn(),
+    pages: () => pages,
+    newCDPSession: vi.fn(async (page: FakePage) => ({
+      send: vi.fn(async () => ({ targetInfo: { targetId: page.targetId, browserContextId: 'ctx' } })),
+      detach
+    })),
+    browser: () => ({ newBrowserCDPSession: vi.fn(async () => browserSession) })
+  }
+  return { context: context as unknown as BrowserContext, createCalls, closeCalls, browserSession, detach }
+}
+
+it('图片通过 Chrome 后台标签页下载并关闭，失败不会报告成功', async () => {
   const url = 'https://pbs.twimg.com/media/test.jpg'
   const bytes = Buffer.from([255, 216, 255, 217])
   const response = { url: () => url, ok: () => true, status: () => 200, headers: () => ({}), body: async () => bytes }
-  const page = { route: vi.fn(), goto: vi.fn().mockResolvedValue(response), close: vi.fn().mockResolvedValue(undefined) }
-  const context = { newPage: async () => page } as unknown as BrowserContext
+  const pages: FakePage[] = []
+  const created: FakePage[] = []
+  const goto = vi.fn().mockResolvedValue(response)
+  const { context, createCalls, detach } = fakeCdpContext(pages, created, {
+    pageExtra: () => ({ route: vi.fn().mockResolvedValue(undefined), goto, close: vi.fn(async function (this: FakePage) { this.closed = true }) })
+  })
   expect(await downloadChromeImage(context, url)).toEqual(bytes)
-  expect(page.goto).toHaveBeenCalledWith(url, expect.objectContaining({ timeout: 30000 }))
-  expect(page.close).toHaveBeenCalledTimes(1)
-  page.goto.mockResolvedValue({ ...response, ok: () => false, status: () => 403 })
+  expect(goto).toHaveBeenCalledWith(url, expect.objectContaining({ timeout: 30000 }))
+  expect(created[0].close).toHaveBeenCalledTimes(1)
+  expect(createCalls[0]).toMatchObject({ url: 'about:blank', background: true, focus: false, newWindow: true, left: -10000, top: 40, width: 1200, height: 900 })
+  expect(createCalls[0]).not.toHaveProperty('browserContextId')
+  goto.mockResolvedValue({ ...response, ok: () => false, status: () => 403 })
   await expect(downloadChromeImage(context, url)).rejects.toThrow('HTTP 403')
-  expect(page.close).toHaveBeenCalledTimes(2)
-  page.goto.mockResolvedValue({ ...response, headers: () => ({ 'content-length': '20971521' }) })
+  expect(created[1].close).toHaveBeenCalledTimes(1)
+  goto.mockResolvedValue({ ...response, headers: () => ({ 'content-length': '20971521' }) })
   await expect(downloadChromeImage(context, url)).rejects.toThrow('20 MiB')
   await expect(downloadChromeImage(context, 'https://secret@pbs.twimg.com/media/a.jpg')).rejects.toThrow('允许范围')
   await expect(downloadChromeImage(context, 'https://example.com/a.jpg')).rejects.toThrow('允许范围')
+  expect(context.newPage).not.toHaveBeenCalled()
+  expect(detach).toHaveBeenCalled()
 })
 
 it('远程图片换成本地短路径仍更新正文，重采保留用户笔记', () => {
@@ -93,9 +140,11 @@ it('首次登录使用普通 Chrome，只有采集模式启用 CDP', () => {
   expect(login).toContain(X_LOGIN_URL)
   expect(login.some(arg => arg.startsWith('--remote-debugging'))).toBe(false)
   const cdp = chromeArgs('profile', 'cdp')
+  expect(cdp).toContain('--no-startup-window')
   expect(cdp).toContain('--remote-debugging-address=127.0.0.1')
   expect(cdp).toContain('--remote-debugging-port=0')
   expect(cdp).toContain('--window-position=-10000,40')
+  expect(cdp).not.toContain('about:blank')
   expect(cdp).not.toContain(X_LOGIN_URL)
 })
 
@@ -229,4 +278,128 @@ it('重采完整长文替换旧的不完整正文并更新 partial，用户编�
   } finally {
     await lib.close()
   }
+})
+
+it('既有页面时后台标签页按目标 ID 匹配并携带 browserContextId', async () => {
+  const existing = fakePage('existing')
+  const created: FakePage[] = []
+  const pages: FakePage[] = [existing]
+  const { context, createCalls, detach } = fakeCdpContext(pages, created, { onCreate: () => 'fresh' })
+  const page = await createBackgroundPage(context)
+  expect(page).toBe(created[0])
+  expect((page as unknown as FakePage).targetId).toBe('fresh')
+  expect(createCalls[0]).toMatchObject({ url: 'about:blank', background: true, focus: false, browserContextId: 'ctx' })
+  expect(createCalls[0]).not.toHaveProperty('newWindow')
+  expect(createCalls[0]).not.toHaveProperty('left')
+  expect(context.newPage).not.toHaveBeenCalled()
+  expect(detach).toHaveBeenCalledTimes(4)
+})
+
+it('后台标签页创建失败时直接报错且不退回前台创建', async () => {
+  const detach = vi.fn().mockResolvedValue(undefined)
+  const browserSession = {
+    send: vi.fn(async (method: string) => { if (method === 'Target.createTarget') throw new Error('Target.createTarget 被拒'); return {} }),
+    detach
+  }
+  const context = {
+    newPage: vi.fn(),
+    pages: () => [] as FakePage[],
+    newCDPSession: vi.fn(),
+    browser: () => ({ newBrowserCDPSession: vi.fn(async () => browserSession) })
+  } as unknown as BrowserContext
+  await expect(createBackgroundPage(context)).rejects.toThrow('Target.createTarget 被拒')
+  expect(context.newPage).not.toHaveBeenCalled()
+  expect(browserSession.send.mock.calls.every(([method]) => method !== 'Target.closeTarget')).toBe(true)
+  expect(detach).toHaveBeenCalledTimes(1)
+})
+
+it('后台标签页 10 秒未出现时关闭目标并报错', async () => {
+  vi.useFakeTimers()
+  try {
+    const pages: FakePage[] = []
+    const created: FakePage[] = []
+    const { context, closeCalls } = fakeCdpContext(pages, created, { onCreate: () => 'ghost' })
+    const invisible = { ...(context as unknown as Record<string, unknown>), pages: () => [] as FakePage[] } as unknown as BrowserContext
+    const promise = createBackgroundPage(invisible)
+    const assertion = expect(promise).rejects.toThrow('10 秒内未取得后台采集页')
+    await vi.advanceTimersByTimeAsync(10_050)
+    await assertion
+    expect(closeCalls).toContainEqual({ targetId: 'ghost' })
+    expect(context.newPage).not.toHaveBeenCalled()
+  } finally { vi.useRealTimers() }
+})
+
+it('书签采集全程不置前页面：滚动与详情采集均无 bringToFront', async () => {
+  const root = mkdtempSync(path.join(temporary, 'focus-'))
+  mkdirSync(path.join(root, 'local'), { recursive: true })
+  const lib = new Library(root)
+  const runSpy = vi.spyOn(BookmarkScanner.prototype, 'run')
+  try {
+    const cap = new XCapture(lib, mkdtempSync(path.join(temporary, 'uf-')), () => {})
+    const detailBringToFront = vi.fn().mockResolvedValue(undefined)
+    const listBringToFront = vi.fn().mockResolvedValue(undefined)
+    const detailPage = fakePage('detail', { bringToFront: detailBringToFront })
+    const listPage = fakePage('list', {
+      bringToFront: listBringToFront,
+      on: vi.fn(),
+      off: vi.fn(),
+      goto: vi.fn().mockResolvedValue({}),
+      url: () => 'https://x.com/i/bookmarks',
+      evaluate: vi.fn().mockResolvedValue({ moved: true, atEnd: false }),
+      close: vi.fn(async function (this: FakePage) { this.closed = true })
+    })
+    const pages: FakePage[] = [detailPage]
+    const created: FakePage[] = []
+    const { context } = fakeCdpContext(pages, created, { onCreate: () => 'list', pageExtra: () => listPage })
+    ;(context as any).cookies = async () => [{ name: 'twid', value: 'u%3D42' }, { name: 'auth_token', value: 'synthetic' }]
+    ;(cap as any).ensureReady = vi.fn().mockResolvedValue(undefined)
+    ;(cap as any).start = vi.fn().mockResolvedValue(context)
+    ;(cap as any).page = detailPage
+    const collectOne = vi.fn().mockResolvedValue({ result: 'created', noteId: 'x-42-123', title: '合成' })
+    ;(cap as any).collectOne = collectOne
+    runSpy.mockImplementation(async function (this: any) {
+      await this.deps.scroll()
+      await this.deps.collectDetail('123', 'https://x.com/synthetic/status/123')
+      return { checked: 1, created: 1, skipped: 0, failed: 0, articlesQueued: 1, stopReason: 'limit' }
+    })
+    const result = await cap.collectBookmarks(20)
+    expect(result.stopReason).toBe('limit')
+    expect(listBringToFront).not.toHaveBeenCalled()
+    expect(detailBringToFront).not.toHaveBeenCalled()
+    expect(listPage.evaluate).toHaveBeenCalled()
+    expect(collectOne).toHaveBeenCalledWith('https://x.com/synthetic/status/123', '123', '42', detailPage, 'bookmarks')
+    expect(listPage.close).toHaveBeenCalled()
+    expect(created).toHaveLength(1)
+    expect(created[0].closed).toBe(true)
+    expect(context.newPage).not.toHaveBeenCalled()
+  } finally {
+    runSpy.mockRestore()
+    await lib.close()
+  }
+})
+
+it('后台隐藏只更新坐标，显式显示才恢复正常窗口状态', async () => {
+  const boundsCalls: unknown[] = []
+  const context = {
+    newCDPSession: vi.fn(async () => ({
+      send: vi.fn(async (method: string, params: Record<string, unknown>) => {
+        if (method === 'Browser.setWindowBounds') boundsCalls.push(params.bounds)
+        return method === 'Browser.getWindowForTarget' ? { windowId: 4321 } : {}
+      }),
+      detach: vi.fn().mockResolvedValue(undefined)
+    }))
+  }
+  const lib = new Library(mkdtempSync(path.join(temporary, 'win-')))
+  const cap = new XCapture(lib, temporary, () => {})
+  ;(cap as any).page = fakePage('main', { context: () => context })
+  try {
+    await (cap as any).hideWindow()
+    await (cap as any).placeWindow(80)
+  } finally {
+    await lib.close()
+  }
+  expect(boundsCalls).toEqual([
+    { left: -10000, top: 40, width: 1200, height: 900 },
+    { left: 80, top: 40, width: 1200, height: 900, windowState: 'normal' }
+  ])
 })

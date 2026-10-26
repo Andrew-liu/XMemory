@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, lstatSync, realpathSync, copyFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, lstatSync, realpathSync, copyFileSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { parseDocument, stringify } from 'yaml'
@@ -14,7 +14,18 @@ export function atomic(file: string, value: string | Buffer) {
   mkdirSync(path.dirname(file), { recursive: true })
   const tmp = `${file}.${randomUUID()}.tmp`
   writeFileSync(tmp, value, { mode: 0o600 })
-  renameSync(tmp, file)
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { renameSync(tmp, file); return }
+      catch (error) {
+        if (!['EPERM', 'EBUSY'].includes((error as NodeJS.ErrnoException).code || '') || attempt === 2) throw error
+        // On Windows, a scanner can briefly lock the destination between write and rename.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1))
+      }
+    }
+  } finally {
+    if (existsSync(tmp)) { try { unlinkSync(tmp) } catch { /* Preserve the write error. */ } }
+  }
 }
 export function safePath(root: string, relative: string): string {
   if (path.isAbsolute(relative) || relative.includes('\0')) throw new Error('路径必须在资料库内')
@@ -92,6 +103,9 @@ export class Library {
   private indexRetries = 0
   private closed = false
   private indexRecovered = false
+  private selfWrites = new Map<string, string>()
+  private pendingFiles = new Set<string>()
+  private fullPending = false
   constructor(public root: string, private changed: () => void = () => {}) {
     for (const folder of [...Object.values(folders), 'assets', 'metadata', 'tombstones', 'conflicts', 'local']) mkdirSync(path.join(root, folder), { recursive: true })
     if (!existsSync(path.join(root, 'manifest.json'))) atomic(path.join(root, 'manifest.json'), JSON.stringify({ schemaVersion: 1, application: 'XMemeory' }))
@@ -118,14 +132,88 @@ export class Library {
   }
   start() {
     this.watcher = chokidar.watch(Object.values(folders).map(f => path.join(this.root, f)), { ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 350, pollInterval: 100 }, ignored: p => p.endsWith('.tmp') })
-    this.watcher.on('all', () => { clearTimeout(this.timer); this.timer = setTimeout(() => {
-      if (this.closed) return
-      try { this.refresh() } catch { this.errors.push('文件刷新失败，请检查资料库访问权限；已有内容仍保留') }
-      this.changed()
-    }, 150) })
+    this.watcher.on('all', (event, file) => {
+      const key = path.resolve(file)
+      const own = this.selfWrites.get(key)
+      if (own !== undefined) {
+        this.selfWrites.delete(key)
+        // Our own atomic save already updated memory; skip the echo instead of rescanning the library.
+        if (event === 'add' || event === 'change') { try { if (hash(readFileSync(key)) === own) return } catch { /* Treat as an external change. */ } }
+      }
+      const relative = path.relative(this.root, key).replaceAll('\\', '/')
+      if (event === 'change' && relative.endsWith('.md')) this.pendingFiles.add(relative)
+      else this.fullPending = true
+      clearTimeout(this.timer); this.timer = setTimeout(() => this.applyExternal(), 150)
+    })
     this.watcher.on('error', () => { this.errors.push('文件监听失败，请检查资料库访问权限'); this.changed() })
   }
+  private applyExternal() {
+    if (this.closed) return
+    const files = [...this.pendingFiles], full = this.fullPending
+    this.pendingFiles.clear(); this.fullPending = false
+    try { if (full || files.some(file => !this.reloadOne(file))) this.refresh() }
+    catch { this.errors.push('文件刷新失败，请检查资料库访问权限；已有内容仍保留') }
+    this.changed()
+  }
   async close() { if (this.closed) return; this.closed = true; clearTimeout(this.timer); clearTimeout(this.indexTimer); await this.watcher?.close(); this.db.close() }
+  private loadFile(kind: Kind, file: string, previous: Map<string, Note>): Note | undefined {
+    const target = safePath(this.root, file)
+    if (lstatSync(target).size > 8 * 1024 * 1024) { this.errors.push(`${file} 超出正文大小限制`); return undefined }
+    const raw = readFileSync(target, 'utf8')
+    const { metadata: meta, body } = decode(raw)
+    const id = typeof meta.xmemeory_id === 'string' ? meta.xmemeory_id : `external-${hash(file).slice(0, 24)}`
+    if (!/^[\w-]{1,100}$/.test(id)) throw new Error('条目 ID 无效')
+    const stat = lstatSync(target)
+    const auxFile = path.join(this.root, 'metadata', `${id}.json`)
+    const aux = existsSync(auxFile) ? JSON.parse(readFileSync(auxFile, 'utf8')) : {}
+    const tombstone = path.join(this.root, 'tombstones', `${id}.json`)
+    const deleted = existsSync(tombstone) && JSON.parse(readFileSync(tombstone, 'utf8')).deleted !== false
+    const old = previous.get(id)
+    const note: Note = { ...aux, id, kind, title: String(meta.title || body.match(/^# (.+)$/m)?.[1] || path.basename(file, '.md')), tags: Array.isArray(meta.tags) ? meta.tags.map(String) : [], body, hash: hash(raw), path: file, createdAt: String(meta.createdAt || stat.birthtime.toISOString()), updatedAt: stat.mtime.toISOString(), deleted }
+    if (typeof meta.author === 'string') note.author = meta.author
+    if (typeof meta.source === 'string') note.source = meta.source
+    if (typeof meta.publishedAt === 'string' && !Number.isNaN(Date.parse(meta.publishedAt))) note.publishedAt = new Date(meta.publishedAt).toISOString()
+    if (Number.isInteger(meta.sortOrder) && meta.sortOrder >= 0) note.sortOrder = meta.sortOrder
+    if (meta.partial === true) note.partial = true
+    note.scheduledDate = validDate(meta.scheduledDate) ? meta.scheduledDate : undefined
+    note.completed = meta.completed === true
+    note.completedAt = note.completed && typeof meta.completedAt === 'string' ? meta.completedAt : undefined
+    if (meta.scheduledDate !== undefined && !validDate(meta.scheduledDate)) this.errors.push(`${file} 的日期无效，已按创建日期显示`)
+    if (old && old.hash !== note.hash && kind === 'memory' && aux.savedHash !== note.hash) note.userEdited = true
+    if (note.userEdited && !aux.userEdited) atomic(auxFile, JSON.stringify({ ...aux, userEdited: true }))
+    return note
+  }
+  /** Reload one Markdown file in place. Returns false when a full refresh is required instead. */
+  private reloadOne(file: string): boolean {
+    if (this.closed) return true
+    const kind = (Object.entries(folders) as [Kind, string][]).find(([, folder]) => file.startsWith(`${folder}/`))?.[0]
+    if (!kind || !existsSync(path.join(this.root, file))) return false
+    const atPath = [...this.notes.values()].find(n => n.path === file)
+    const errors = this.errors.length
+    let note: Note | undefined
+    try { note = this.loadFile(kind, file, this.notes) } catch { return false }
+    if (!note || this.errors.length !== errors) return false
+    const sameId = this.notes.get(note.id)
+    // Renames, duplicate IDs and pending conflicts keep the full-refresh path and its safeguards.
+    if ((atPath && atPath.id !== note.id) || (sameId && sameId.path !== file) || [...this.conflicts.values()].some(c => c.noteId === note!.id)) return false
+    this.errors = this.errors.filter(message => !message.startsWith(`${file}`))
+    this.notes.set(note.id, note)
+    this.indexOne(note)
+    return true
+  }
+  private indexOne(n: Note) {
+    let began = false
+    try {
+      this.db.exec('BEGIN IMMEDIATE'); began = true
+      this.db.prepare('DELETE FROM search WHERE id = ?').run(n.id)
+      this.db.prepare('INSERT INTO search(id,text) VALUES (?,?)').run(n.id, [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction].join('\n'))
+      this.db.exec('COMMIT')
+    } catch {
+      if (began) { try { this.db.exec('ROLLBACK') } catch { /* Fall back to a full rebuild below. */ } }
+      this.indexRetries = 0
+      this.updateIndex()
+    }
+  }
   refresh() {
     if (this.closed) return
     this.errors = this.indexRecovered ? ['本地索引损坏，已保留损坏副本并从 Markdown 自动重建。'] : []
@@ -135,32 +223,10 @@ export class Library {
     for (const [kind, folder] of Object.entries(folders)) {
       for (const file of walk(this.root, folder).filter(f => f.endsWith('.md'))) {
         try {
-          const target = safePath(this.root, file)
-          if (lstatSync(target).size > 8 * 1024 * 1024) { this.errors.push(`${file} 超出正文大小限制`); continue }
-          const raw = readFileSync(target, 'utf8')
-          const { metadata: meta, body } = decode(raw)
-          const id = typeof meta.xmemeory_id === 'string' ? meta.xmemeory_id : `external-${hash(file).slice(0, 24)}`
-          if (!/^[\w-]{1,100}$/.test(id)) throw new Error('条目 ID 无效')
-          if (next.has(id)) { this.errors.push(`${file} 与其他文件 ID 重复`); continue }
-          const stat = lstatSync(target)
-          const auxFile = path.join(this.root, 'metadata', `${id}.json`)
-          const aux = existsSync(auxFile) ? JSON.parse(readFileSync(auxFile, 'utf8')) : {}
-          const tombstone = path.join(this.root, 'tombstones', `${id}.json`)
-          const deleted = existsSync(tombstone) && JSON.parse(readFileSync(tombstone, 'utf8')).deleted !== false
-          const old = previous.get(id)
-          const note: Note = { ...aux, id, kind: kind as Kind, title: String(meta.title || body.match(/^# (.+)$/m)?.[1] || path.basename(file, '.md')), tags: Array.isArray(meta.tags) ? meta.tags.map(String) : [], body, hash: hash(raw), path: file, createdAt: String(meta.createdAt || stat.birthtime.toISOString()), updatedAt: stat.mtime.toISOString(), deleted }
-          if (typeof meta.author === 'string') note.author = meta.author
-          if (typeof meta.source === 'string') note.source = meta.source
-          if (typeof meta.publishedAt === 'string' && !Number.isNaN(Date.parse(meta.publishedAt))) note.publishedAt = new Date(meta.publishedAt).toISOString()
-          if (Number.isInteger(meta.sortOrder) && meta.sortOrder >= 0) note.sortOrder = meta.sortOrder
-          if (meta.partial === true) note.partial = true
-          note.scheduledDate = validDate(meta.scheduledDate) ? meta.scheduledDate : undefined
-          note.completed = meta.completed === true
-          note.completedAt = note.completed && typeof meta.completedAt === 'string' ? meta.completedAt : undefined
-          if (meta.scheduledDate !== undefined && !validDate(meta.scheduledDate)) this.errors.push(`${file} 的日期无效，已按创建日期显示`)
-          if (old && old.hash !== note.hash && kind === 'memory' && aux.savedHash !== note.hash) note.userEdited = true
-          if (note.userEdited && !aux.userEdited) atomic(auxFile, JSON.stringify({ ...aux, userEdited: true }))
-          next.set(id, note)
+          const note = this.loadFile(kind as Kind, file, previous)
+          if (!note) continue
+          if (next.has(note.id)) { this.errors.push(`${file} 与其他文件 ID 重复`); continue }
+          next.set(note.id, note)
         } catch (e) { this.errors.push(`${file}: ${e instanceof Error ? e.message : '无法读取'}`) }
       }
     }
@@ -233,7 +299,7 @@ export class Library {
     }
   }
   get(id: string) { const note = this.notes.get(id); if (!note) throw new Error('找不到条目，请刷新'); return note }
-  save(input: Partial<Note> & { kind: Kind; title: string; body: string }, expected?: string): Note {
+  save(input: Partial<Note> & { kind: Kind; title: string; body: string }, expected?: string, options?: { quiet?: boolean }): Note {
     if (input.scheduledDate !== undefined && !validDate(input.scheduledDate)) throw new Error('无效日历日期')
     if (!(input.kind in folders) || input.body.length > 4_000_000 || input.title.length > 400) throw new Error('正文或标题超出限制')
     const id = input.id || randomUUID()
@@ -262,12 +328,18 @@ export class Library {
     const persisted = (before.startsWith('\uFEFF') ? '\uFEFF' : '') + raw.replace(/\r?\n/g, eol)
     atomic(path.join(this.root, 'local/pending.json'), JSON.stringify({ path: relative, before: hash(before), raw: persisted }))
     if (before) atomic(path.join(this.root, 'local', `previous-${id}.md`), before)
+    if (this.watcher) {
+      if (this.selfWrites.size > 500) this.selfWrites.clear()
+      this.selfWrites.set(path.resolve(target), hash(persisted))
+    }
     atomic(target, persisted)
     const defined = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
     const { body: _body, hash: _hash, path: _path, ...aux } = { ...old, ...defined, id, author, source, partial }
     atomic(path.join(this.root, 'metadata', `${id}.json`), JSON.stringify({ ...aux, savedHash: hash(persisted) }))
     atomic(path.join(this.root, 'local/pending.json'), 'null')
-    this.refresh(); this.changed()
+    // Only this file changed: re-read it alone instead of rescanning every note and rebuilding the index.
+    if (!this.reloadOne(relative)) this.refresh()
+    if (!options?.quiet) this.changed()
     return this.get(id)
   }
   private makeConflict(current: Note, incoming: Note, originals?: { currentRaw: string; incomingRaw: string }): Conflict {
