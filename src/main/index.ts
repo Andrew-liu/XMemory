@@ -14,6 +14,7 @@ import { palettes, themeColors } from '../shared/themes'
 import { XCapture } from './x-capture'
 import { AutoCollector } from './auto-collect'
 import { addRecovery, clearRecoveries, pendingRecoveries } from './recovery'
+import { trayIcon16, trayIcon32 } from './tray-icon'
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 let win: BrowserWindow
@@ -258,12 +259,8 @@ app.whenReady().then(async () => {
   if (startHidden) win.once('show', showRecoveryNotice)
   else showRecoveryNotice()
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'XMemeory', submenu: [{ label: '显示窗口', click: () => win.show() }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }]))
-  const pixels = Buffer.alloc(32 * 32 * 4)
-  for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
-    const at = (y * 32 + x) * 4, stroke = x > 6 && x < 25 && (Math.abs(x-y) < 3 || Math.abs(x+y-31) < 3)
-    pixels.set(stroke ? [255,255,255,255] : [176,106,62,255], at)
-  }
-  const icon = nativeImage.createFromBitmap(pixels, { width: 32, height: 32 })
+  const icon = nativeImage.createFromDataURL(trayIcon16)
+  icon.addRepresentation({ scaleFactor: 2, dataURL: trayIcon32 })
   tray = new Tray(icon); tray.setToolTip('XMemeory'); tray.setContextMenu(Menu.buildFromTemplate([{ label: '打开 XMemeory', click: () => win.show() }, { label: '退出', click: () => app.quit() }])); tray.on('click', () => win.show())
   win.on('close', e => {
     if (quitting) return

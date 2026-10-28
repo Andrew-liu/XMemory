@@ -153,7 +153,7 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 
 ## 下载与安装
 
-源码通过 Git 版本标签发布，可在 [Tags](https://github.com/Andrew-liu/XMemory/tags) 页面获取。当前版本为 0.6.0，暂未提供公开的安装包下载，可按下文自行构建 Windows 免安装版。
+在 [Releases](https://github.com/Andrew-liu/XMemory/releases) 页面下载 Windows 安装版（`XMemeory.Setup.<版本>.exe`）或免安装版（`XMemeory-<版本>-win-x64.zip`，完整解压后运行文件夹里的 `XMemeory.exe`）。源码通过 Git 版本标签发布，也可按下文自行构建。
 
 - 运行环境：Windows 10/11 x64
 - X 书签采集：需要本机安装正式版 Google Chrome

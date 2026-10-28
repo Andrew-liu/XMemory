@@ -20,6 +20,8 @@
 - 记忆排序修复后重新打包：`release/XMemeory-0.6.0-portable-20261027-r2/`（ZIP 约 168 MiB，238 个文件，EXE 哈希一致）；打包程序的 memory、themes、clean-exit 桌面专项通过。之前的 `-20261027` 包不含此修复。
 - README 按 doocs/md 版式重写：居中 Logo（三条由长到短的横线加朱红小方块）、和纸配色徽章、功能对照表、折叠式功能详解与 `docs/images/` 下的合成数据截图。
 - 发布前重新打包：`release/XMemeory-0.6.0-portable-20261028-r5/`（ZIP 约 168 MiB，238 个文件与目录一致，EXE 哈希一致）；应用代码与 `-r4` 相同，本次按要求未运行测试。
+- 应用图标改为新 Logo：`build/icon.ico`（16–256px 九档）由 `docs/images/logo.svg` 渲染生成，exe、安装程序、任务栏与窗口不再显示 Electron 默认图标；托盘图标由代码绘制的棕色 X 改为同一 Logo（16/32px，对应 100%/200% 缩放，`src/main/tray-icon.ts`）。（同属 0.6.0，未升版本号；该改动在 `v0.6.0` 标签之后提交，Release 附件由包含图标的提交构建）
+- GitHub Release v0.6.0：附件为 `XMemeory.Setup.0.6.0.exe`（NSIS 安装版）与 `XMemeory-0.6.0-win-x64.zip`（免安装版），本地产物位于 `release/XMemeory-0.6.0-release-20261028/`。验证：类型检查通过；ZIP 240 个文件与目录一致，EXE 哈希一致；从 exe 与安装程序提取的图标均为新 Logo；打包程序的 clean-exit 桌面专项通过。其余单元测试与桌面专项本次未重跑。
 
 ## v0.5.6 版本来源信息与不完整记忆自动补采（2026-10-26）
 
