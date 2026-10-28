@@ -5,12 +5,25 @@ import Image from '@tiptap/extension-image'
 import { TableKit } from '@tiptap/extension-table'
 import { Markdown } from '@tiptap/markdown'
 import FileHandler from '@tiptap/extension-file-handler'
-import { Bold, Italic, List, Quote, Code, Table2, Link2, ImagePlus, FileCode2, Eye, ArrowDownToLine } from 'lucide-react'
+import { Bold, Italic, List, Quote, Code, RemoveFormatting, Table2, Link2, ImagePlus, FileCode2, Eye, ArrowDownToLine } from 'lucide-react'
 import type { Note } from '../shared/types'
 import { Wiki, resolveLink } from './wiki'
-import { findSearchMatch } from '../shared/search-location'
-import { prepareMarkdown } from './markdown'
+import { findAllSearchMatches, findSearchMatch } from '../shared/search-location'
+import { prepareMarkdown, splitPastedLineBreaks } from './markdown'
+import { Fragment, Slice } from '@tiptap/pm/model'
 import { TypedMarkdownLink, linkAddress } from './links'
+
+const SEARCH_HIGHLIGHT = 'xm-search'
+/** Map an offset range in the concatenated text of `nodes` back to a DOM Range. */
+function textRange(nodes: Text[], from: number, to: number): Range | undefined {
+  const range = document.createRange(); let offset = 0, started = false
+  for (const node of nodes) {
+    if (!started && from < offset + node.length) { range.setStart(node, from - offset); started = true }
+    if (started && to <= offset + node.length) { range.setEnd(node, to - offset); return range }
+    offset += node.length
+  }
+  return undefined
+}
 
 export interface EditorHandle { flush(): Promise<void>; recover(): Promise<void> }
 export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: string; request: number }; note: Note; notes: Note[]; open: (id: string) => void; error: (s: string) => void; saved: (note: Note) => void }>(function NoteEditor({ searchLocation, note, notes, open, error, saved }, ref) {
@@ -139,8 +152,17 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
         // Plain Markdown from editors/chat often also has an HTML text wrapper.
         if (!/(?:^|\n)\s*\|?.+\|.+\n\s*\|?\s*:?-{3,}|!?\[[^\]\n]+\]\([^)]+\)|!?\[\[[^\]\n]+\]\]/m.test(text)) return false
         event.preventDefault()
-        editor?.commands.insertContent(prepareMarkdown(text), { contentType: 'markdown' })
+        const markdown = prepareMarkdown(text)
+        const parsed = editor?.markdown?.parse(markdown)
+        if (parsed?.content) editor?.commands.insertContent(splitPastedLineBreaks(parsed).content!)
+        else editor?.commands.insertContent(markdown, { contentType: 'markdown' })
         return true
+      },
+      // HTML and plain-text paste: <br> line breaks become separate paragraphs, matching Enter (Shift+Enter is unaffected).
+      transformPasted: (slice, view) => {
+        const doc = splitPastedLineBreaks({ type: 'doc', content: slice.content.toJSON() || [] })
+        try { return new Slice(Fragment.fromJSON(view.state.schema, doc.content || []), slice.openStart, slice.openEnd) }
+        catch { return slice }
       },
       handleClick: (_view, _pos, event) => {
         const element = event.target as HTMLElement
@@ -218,6 +240,22 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
     })
     return () => cancelAnimationFrame(frame)
   }, [searchLocation, editor, source])
+  useEffect(() => {
+    // CSS Custom Highlight paints every match without touching the document, so it never marks the note dirty.
+    if (typeof CSS === 'undefined' || !('highlights' in CSS) || typeof Highlight === 'undefined') return
+    const query = searchLocation?.query.trim()
+    if (!query || !editor || source) { CSS.highlights.delete(SEARCH_HIGHLIGHT); return }
+    const paint = () => {
+      const walker = document.createTreeWalker(editor.view.dom, NodeFilter.SHOW_TEXT)
+      const nodes: Text[] = []; let text = ''
+      while (walker.nextNode()) { const node = walker.currentNode as Text; nodes.push(node); text += node.data }
+      const ranges = findAllSearchMatches(text, query).map(match => textRange(nodes, match.from, match.to)).filter((range): range is Range => !!range)
+      CSS.highlights.set(SEARCH_HIGHLIGHT, new Highlight(...ranges))
+    }
+    paint()
+    editor.on('update', paint)
+    return () => { editor.off('update', paint); CSS.highlights.delete(SEARCH_HIGHLIGHT) }
+  }, [searchLocation, editor, source])
   const backlinks = useMemo(() => notes.filter(n => n.id !== note.id && (n.body.includes(`[[${note.title}`) || n.body.includes(`[[${note.path.replace(/\.md$/, '')}`))), [notes, note.id, note.title, note.path])
   const command = (fn: () => void) => { if (source) { editor?.commands.setContent(prepareMarkdown(body), { contentType: 'markdown', emitUpdate: false }); setSource(false) }; fn(); editor?.commands.focus() }
   const toggle = () => { if (source) editor?.commands.setContent(prepareMarkdown(body), { contentType: 'markdown', emitUpdate: false }); setSource(!source) }
@@ -240,6 +278,8 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
       <button title="列表" onClick={() => command(() => editor?.chain().toggleBulletList().run())}><List size={17}/></button>
       <button title="引用" onClick={() => command(() => editor?.chain().toggleBlockquote().run())}><Quote size={16}/></button>
       <button title="代码块" onClick={() => command(() => editor?.chain().toggleCodeBlock().run())}><Code size={17}/></button>
+      {/* Clears inline marks (bold, italic, code, links…) and turns headings, lists, quotes and code blocks back into plain paragraphs. Images, tables and wiki links stay. */}
+      <button title="清除格式" aria-label="清除格式" onClick={() => command(() => editor?.chain().unsetAllMarks().clearNodes().run())}><RemoveFormatting size={16}/></button>
       <span className="toolbar-divider"/>
       <button title="插入表格" onClick={() => command(() => editor?.chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run())}><Table2 size={17}/></button>
       <button title="添加表格行" onClick={() => command(() => editor?.chain().addRowAfter().run())}>+行</button>

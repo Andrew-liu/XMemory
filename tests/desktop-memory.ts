@@ -19,6 +19,8 @@ try {
   expect(stored().autoCollect).toBe(false)
   expect(stored().memoryView).toBe('list')
   await page.evaluate(async () => {
+    // Saved first but published between the other two: list order must follow publish time, not save time.
+    await window.xm.save({ id: 'x-1-33', kind: 'memory', title: 'Carol 的书签', body: '可检索正文丙', author: 'carol', source: 'https://example.com/c/status/33', publishedAt: '2025-06-01T08:00:00.000Z', partial: false })
     await window.xm.save({ id: 'x-1-11', kind: 'memory', title: 'Alice 的书签', body: '可检索正文甲\n\n![书签图片](../assets/demo.png)\n\n[原文](https://example.com/a/status/11)\n\n> 视频未下载，仅保留封面和原文链接。', author: 'alice', source: 'https://example.com/a/status/11', publishedAt: '2024-02-03T08:30:00.000Z', partial: false })
     await window.xm.save({ id: 'x-1-22', kind: 'memory', title: 'Bob 的书签', body: '可检索正文乙，正文可能不完整，X 未返回完整内容。\n\n[原文](https://example.com/b/status/22)', author: 'bob', source: 'https://example.com/b/status/22', partial: true })
   })
@@ -39,6 +41,7 @@ try {
   await expect(page.locator('.auto-collect').getByRole('button', { name: '开启自动采集' })).toBeVisible()
   await expect(page.getByRole('button', { name: '去开启自动采集' })).toBeVisible()
   await expect(page.locator('.note-card').filter({ hasText: 'Alice 的书签' }).locator('time')).toHaveText('02/03')
+  await expect(page.locator('.note-card h3')).toHaveText(['Bob 的书签', 'Carol 的书签', 'Alice 的书签'])
 
   // T-07 in the UI: partial shortcut, @author and combination.
   const search = header.getByLabel('搜索记忆')
@@ -91,7 +94,7 @@ try {
   await nav('设置').click()
   const runtimeVersion = await page.evaluate(async () => (await window.xm.snapshot()).version)
   await expect(page.getByLabel('当前版本')).toHaveText(`v${runtimeVersion}`)
-  if (!process.env.XMEMEORY_TEST_EXE) expect(runtimeVersion).toBe('0.5.6')
+  if (!process.env.XMEMEORY_TEST_EXE) expect(runtimeVersion).toBe(JSON.parse(readFileSync('package.json', 'utf8')).version)
   await expect(page.getByRole('button', { name: 'github.com/Andrew-liu/XMemory' })).toBeVisible()
   await expect(page.getByText('这是应用源码仓库，与上方配置的私有数据同步仓库不同。')).toBeVisible()
   const toggle = page.getByLabel('在这台电脑上自动采集书签')

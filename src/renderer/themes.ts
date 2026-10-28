@@ -7,7 +7,7 @@ export function resolveDark(mode: ThemeMode) { return mode === 'dark' || (mode =
 
 export function applyTheme(mode: ThemeMode, palette: Palette | undefined) {
   const dark = resolveDark(mode)
-  const name = isPalette(palette) ? palette : 'mist'
+  const name = isPalette(palette) ? palette : 'washi'
   const root = document.documentElement
   root.dataset.theme = dark ? 'dark' : 'light'
   root.dataset.palette = name

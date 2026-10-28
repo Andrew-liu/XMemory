@@ -1,5 +1,26 @@
 # ChangeLog
 
+## v0.6.0 和风极简视觉重构（2026-10-27）
+
+- 全面改为和风极简：纸白底、墨色正文、靛蓝主色、朱红点缀；2px 圆角与细线分隔取代卡片阴影，侧栏品牌改为朱红圆点，当前导航以小圆点标示，侧栏底部加竖排标语（窗口高度低于 680 时隐藏）。
+- 删除原六套配色及设置页配色区，只保留“和纸”亮/暗两版；旧配色值由主进程启动时清除并回退和纸。暗版按对比度分级校验：正文 ≥12:1、辅助文字 ≥7:1，亮版正文 ≥7:1、辅助文字 ≥4.5:1，朱红 ≥4.5:1，主按钮与次级按钮边框 ≥3:1。
+- 标题与编辑器标题使用思源宋体（`@fontsource/noto-serif-sc` 5.3.1，OFL，400/600 两档，按 unicode-range 切片）；只打包 woff2，关闭字体内联以符合 CSP（约 6MB 随应用分发，无需联网）。
+- 列表、编辑器、日历、选题、设置页同步改版：正文 15px / 行高 2.1，引用改朱红细线，日历今天为靛蓝圆点、选中日加朱红下划线；GitHub 同步“修改连接”改为可折叠，关于区与其他设置行对齐。
+- 修复搜索结果点击后列表重新排序：同一次搜索内保持稳定顺序；搜索关键词在列表与正文中统一高亮为黄色。
+- 修复日历灵感与选题复选框勾选无即时反馈：受控复选框在保存完成前会被回滚，改为乐观显示勾选状态，保存结束后以实际数据为准；calendar、topics 桌面专项的历史已知失败随之解决。
+- 验证：类型检查、194/194 单元测试（主题测试由六套配色 37 项改为和纸 8 项）、生产构建（字体 196 个 woff2 切片，无 woff、无 data URI）；desktop、themes、calendar、topics、search-location、memory、recovery、clean-exit、conflicts、conflict-unlock、github-token、image-copy、source-image、sync-cache 桌面专项通过。`search-location` 在一轮批量运行与一次单独运行中偶发失败（源码模式未及时出现），随后连续 14 次未复现，原因未定位。
+- 修复记忆列表未按时间排序：原先按最近修改时间排列，打开或补采过的记忆会跳到前面；改为按卡片上显示的时间（X 发布时间，缺失时用保存时间）从新到老排列，同一时间按固定顺序。列表与卡片视图一致；搜索页、灵感、选题排序不变。新增 3 项单元测试与记忆页桌面断言；`desktop-memory` 中写死的版本号改为读取 package.json。（同属 0.6.0，未升版本号）
+- 编辑器工具栏新增“清除格式”按钮（灵感、选题、候选稿共用）：对选中内容去掉加粗、斜体、行内代码、链接等行内格式，并把标题、列表、引用、代码块还原为普通段落；图片、表格、双链保留。（同属 0.6.0，未升版本号）
+- 修复中文斜体不显示：根样式 `font-synthesis:none` 让没有斜体字形的中文字体（思源宋体、微软雅黑）无法倾斜；改为正文 `em`/`i` 允许模拟倾斜，粗体仍不模拟。（同属 0.6.0，未升版本号）
+- 验证（清除格式与斜体）：`desktop` 验收新增“清除选中格式”（核对保存的 Markdown，未选中的加粗保留）与“中文斜体显示”（正文与引用中斜体和正体截图必须不同；去掉修复时该项失败，修复后通过）；类型检查、197/197 单元测试、生产构建，themes、memory、topics、calendar、search-location、source-image、image-copy、clean-exit 桌面专项通过。已重新打包免安装包 `release/XMemeory-0.6.0-portable-20261027-r3`（ZIP 约 168 MiB），打包 exe 的 desktop（含清除格式与斜体）、themes、memory、clean-exit 冒烟通过。
+- 粘贴内容段落间距统一：从网页、聊天软件粘贴的 `<br>` 与粘贴 Markdown 里的单个换行，原先成为段内换行（行距约 31px，比段落间距约 50px 紧），与按 Enter 分出的段落间距不一致；现在粘贴时一律拆成独立段落，连续换行不产生空段，代码块、标题、表格单元格不拆，格式保留。手动 Shift+Enter 仍是段内换行；已有笔记不自动改写。（同属 0.6.0，未升版本号）
+- 验证（粘贴拆段）：新增 `paste-paragraphs` 6 项单元测试（共 203/203 通过）；`desktop` 验收新增“粘贴换行转段落”，经系统剪贴板粘贴 HTML 与 Markdown 并核对保存内容，停用拆段时该项失败（段内换行 4 个），修复后通过（仅剩 Shift+Enter 的 1 个）；类型检查、生产构建，topics、calendar、source-image、image-copy、search-location、themes、memory、clean-exit、recovery 桌面专项通过。已重新打包免安装包 `release/XMemeory-0.6.0-portable-20261028-r4`（ZIP 约 168 MiB），打包 exe 的 desktop（含粘贴换行转段落）、themes、memory、clean-exit 冒烟通过。
+- 字体包 `@fontsource/noto-serif-sc` 改为 devDependencies：放在 dependencies 时 electron-builder 会把 83MB 的整个 npm 包（全部字重及 woff/woff2）打进 app.asar，ZIP 涨到 250MB；字体已由 vite 打进 renderer，移走后 ZIP 回到约 168 MiB。
+- Windows 免安装测试包：`release/XMemeory-0.6.0-portable-20261027/`（应用目录 `XMemeory-0.6.0/` 与 `XMemeory-0.6.0-portable-win-x64.zip`，ZIP 约 168 MiB）。使用本地 Electron 44.3.0 构建；打包程序的 themes、memory、clean-exit、calendar、topics 桌面专项通过，search-location 首次偶发失败、随后 4 次通过；ZIP 文件数量（238）与目录一致、其中的 EXE 与目录 EXE 哈希一致。可执行文件未签名；测试包仅留在本机，未提交、未上传 GitHub Release。
+- 记忆排序修复后重新打包：`release/XMemeory-0.6.0-portable-20261027-r2/`（ZIP 约 168 MiB，238 个文件，EXE 哈希一致）；打包程序的 memory、themes、clean-exit 桌面专项通过。之前的 `-20261027` 包不含此修复。
+- README 按 doocs/md 版式重写：居中 Logo（三条由长到短的横线加朱红小方块）、和纸配色徽章、功能对照表、折叠式功能详解与 `docs/images/` 下的合成数据截图。
+- 发布前重新打包：`release/XMemeory-0.6.0-portable-20261028-r5/`（ZIP 约 168 MiB，238 个文件与目录一致，EXE 哈希一致）；应用代码与 `-r4` 相同，本次按要求未运行测试。
+
 ## v0.5.6 版本来源信息与不完整记忆自动补采（2026-10-26）
 
 - 设置页“关于”显示实际运行版本与 XMemeory 源码仓库入口；与用于同步个人资料的 GitHub 私库明确区分。

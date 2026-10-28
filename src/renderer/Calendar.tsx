@@ -30,6 +30,7 @@ export function planTodoMove(notes: Note[], draggedId: string, targetDate: strin
 export function Calendar({ notes, anchor, setAnchor, mode, setMode, open, refresh, error }: { notes: Note[]; anchor: string; setAnchor: (date: string) => void; mode: 'week'|'month'; setMode: (mode: 'week'|'month') => void; open: (id: string) => void; refresh: () => Promise<unknown>; error: (message: string) => void }) {
   const [inputs, setInputs] = useState<Record<string,string>>({})
   const [busy, setBusy] = useState<string[]>([])
+  const [pending, setPending] = useState<Record<string, boolean>>({})
   const [dragged, setDragged] = useState('')
   const [dragOver, setDragOver] = useState('')
   const [dragDate, setDragDate] = useState('')
@@ -49,9 +50,9 @@ export function Calendar({ notes, anchor, setAnchor, mode, setMode, open, refres
   }
   async function toggle(note: Note) {
     if (busy.includes(note.id)) return
-    setBusy(v => [...v,note.id])
+    setBusy(v => [...v,note.id]); setPending(v => ({ ...v, [note.id]: !note.completed }))
     try { await window.xm.save({ ...note, completed: !note.completed }, note.hash); await refresh() }
-    catch(e) { error((e as Error).message) } finally { setBusy(v => v.filter(x => x !== note.id)) }
+    catch(e) { error((e as Error).message) } finally { setBusy(v => v.filter(x => x !== note.id)); setPending(v => { const rest = { ...v }; delete rest[note.id]; return rest }) }
   }
   async function move(targetDate: string, targetId?: string) {
     if (!dragged || dragged === targetId) return
@@ -76,7 +77,7 @@ export function Calendar({ notes, anchor, setAnchor, mode, setMode, open, refres
       const entries = notes.filter(n => !n.deleted && n.kind === 'inspiration' && noteDate(n) === date).sort(compareTodoOrder)
       return <section key={date} aria-label={date} className={`calendar-day ${date===today?'today':''} ${date===anchor?'chosen-day':''} ${dragDate===date?'drag-target':''} ${mode==='month' && date.slice(0,7)!==anchor.slice(0,7)?'outside':''}`} onDragOver={e=>{if(dragged){e.preventDefault();setDragDate(date);setDragOver('')}}} onDrop={e=>{e.preventDefault();void move(date)}}>
         <button className="day-heading" onClick={()=>setAnchor(date)}><span>{['周一','周二','周三','周四','周五','周六','周日'][index%7]}</span><strong>{Number(date.slice(-2))}</strong><small>{entries.length || ''}</small></button>
-        <div className="day-entries">{entries.map(note=><div key={note.id} data-note-id={note.id} className={`calendar-entry ${note.completed?'completed':''} ${dragged===note.id?'dragging':''} ${dragOver===note.id?'drag-over':''}`} onDragOver={e=>{if(dragged){e.preventDefault();e.stopPropagation();setDragDate(date);setDragOver(note.id)}}} onDrop={e=>{e.preventDefault();e.stopPropagation();void move(date,note.id)}}><button className="drag-handle" aria-label={`拖动 ${note.title} 调整顺序或日期`} title="拖动调整顺序或日期" draggable={!busy.includes(note.id)} onDragStart={e=>{setDragged(note.id);setDragDate(date);e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',note.id)}} onDragEnd={()=>{setDragged('');setDragOver('');setDragDate('')}}><GripVertical size={14}/></button><input type="checkbox" aria-label={`标记 ${note.title} 已使用`} checked={!!note.completed} disabled={busy.includes(note.id)} onChange={()=>void toggle(note)}/><button onClick={()=>{setAnchor(date);open(note.id)}} title={note.title}>{note.title}</button></div>)}</div>
+        <div className="day-entries">{entries.map(note=><div key={note.id} data-note-id={note.id} className={`calendar-entry ${note.completed?'completed':''} ${dragged===note.id?'dragging':''} ${dragOver===note.id?'drag-over':''}`} onDragOver={e=>{if(dragged){e.preventDefault();e.stopPropagation();setDragDate(date);setDragOver(note.id)}}} onDrop={e=>{e.preventDefault();e.stopPropagation();void move(date,note.id)}}><button className="drag-handle" aria-label={`拖动 ${note.title} 调整顺序或日期`} title="拖动调整顺序或日期" draggable={!busy.includes(note.id)} onDragStart={e=>{setDragged(note.id);setDragDate(date);e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',note.id)}} onDragEnd={()=>{setDragged('');setDragOver('');setDragDate('')}}><GripVertical size={14}/></button><input type="checkbox" aria-label={`标记 ${note.title} 已使用`} checked={pending[note.id] ?? !!note.completed} disabled={busy.includes(note.id)} onChange={()=>void toggle(note)}/><button onClick={()=>{setAnchor(date);open(note.id)}} title={note.title}>{note.title}</button></div>)}</div>
         <form className="quick-create" onSubmit={e=>{e.preventDefault();void create(date)}}><Plus size={13}/><input aria-label={`${date} 新灵感标题`} placeholder="记一个想法…" value={inputs[date] || ''} maxLength={400} disabled={busy.includes(date)} onChange={e=>setInputs(v=>({...v,[date]:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter' && e.nativeEvent.isComposing)e.preventDefault()}}/></form>
       </section>
     })}</div>

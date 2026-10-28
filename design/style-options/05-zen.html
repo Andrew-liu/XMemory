@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 和风极简 · XMemeory 风格预览</title>
+<style>
+:root{--bg:#fbfaf7;--ink:#2b2b2b;--muted:#9a968e;--line:#ebe7df;--ai:#2e4a62;--shu:#c8442f;--mark:#ffe14d;--font:"Noto Sans JP","Hiragino Sans","PingFang SC","Microsoft YaHei",sans-serif;--min:"Noto Serif SC","Songti SC","SimSun",serif}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font:300 14px/1.8 var(--font);letter-spacing:.04em}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;text-align:left}
+mark{background:linear-gradient(transparent 15%,var(--mark) 15%);color:#1f1a00}
+.app{display:grid;grid-template-columns:200px 1fr;height:100vh}
+.side{padding:48px 28px;display:flex;flex-direction:column;gap:36px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:22px;height:22px;border-radius:50%;background:var(--shu);color:transparent;overflow:hidden}
+.brand-name{font-weight:400;letter-spacing:.2em;font-size:13px}
+.search-all{display:flex;justify-content:space-between;color:var(--muted);font-size:12px}
+kbd{font:10px var(--font);color:var(--muted)}
+.nav{display:flex;flex-direction:column;gap:14px}
+.nav-item{display:flex;justify-content:space-between;color:var(--muted);font-size:14px}
+.nav-item.on{color:var(--ink);font-weight:500}
+.nav-item.on .nav-name::after{content:"";display:inline-block;width:5px;height:5px;background:var(--shu);border-radius:50%;margin-left:8px;vertical-align:middle}
+.nav-count{font-size:11px}
+.motto{writing-mode:vertical-rl;font:13px/2 var(--min);color:var(--muted);height:220px;letter-spacing:.3em}
+.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;font-size:12px}
+.local{font-size:10px;color:var(--muted)}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{display:flex;align-items:center;gap:24px;padding:44px 48px 20px}
+.page-title{font:400 22px var(--min);letter-spacing:.3em;display:flex;align-items:baseline;gap:12px}
+.page-count{font:300 11px var(--font);color:var(--muted);letter-spacing:.1em}
+.partial-link{font-size:11px;color:var(--shu)}
+.search{margin-left:auto;display:flex;align-items:center;gap:10px;width:320px;border-bottom:1px solid var(--line);padding:6px 0}
+.search-icon{color:var(--muted)}
+.search input{flex:1;border:0;outline:0;background:none;font:inherit;color:var(--ink)}
+.search input:focus{border-color:var(--ai)}
+.status{display:flex;align-items:center;gap:12px;margin:0 48px;padding:10px 0;font-size:11px;color:var(--muted);border-top:1px solid var(--line);border-bottom:1px solid var(--line);position:relative}
+.status-dot{width:5px;height:5px;border-radius:50%;background:var(--ai)}
+.status .btn{margin-left:auto}
+.progress{position:absolute;left:0;right:0;bottom:-1px;height:1px}
+.progress i{display:block;height:100%;width:6%;background:var(--ai)}
+.btn{font-size:12px;color:var(--ai);padding:2px 0;border-bottom:1px solid transparent}
+.btn:hover{border-bottom-color:var(--ai)}
+.btn.ghost{color:var(--muted)}
+.body{flex:1;display:grid;grid-template-columns:360px 1fr;min-height:0;padding:0 48px}
+.list{overflow:auto;padding:20px 32px 40px 0}
+.list-head{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);padding-bottom:16px}
+.eyebrow{font-size:11px;color:var(--muted);letter-spacing:.3em}
+.card{display:block;width:100%;padding:22px 0;border-bottom:1px solid var(--line);position:relative;transition:opacity .2s}
+.list:hover .card{opacity:.55}
+.list .card:hover,.list .card.on{opacity:1}
+.card.on::before{content:"";position:absolute;left:-16px;top:28px;width:6px;height:6px;border-radius:50%;background:var(--shu)}
+.card-meta{display:flex;gap:14px;font-size:11px;color:var(--muted)}
+.card-title{font:400 16px/1.6 var(--min);margin:6px 0}
+.card-snippet{font-size:12.5px;color:#6f6b64;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card-tag{font-size:10px;color:var(--muted);letter-spacing:.2em}
+.card-tag.warn{color:var(--shu)}
+.empty{color:var(--muted);padding:40px 0;font-family:var(--min)}
+.detail{overflow:auto;padding:20px 0 80px 64px;border-left:1px solid var(--line)}
+.actions{display:flex;gap:24px;align-items:center;margin-bottom:60px}
+.saved{margin-left:auto;font-size:11px;color:var(--muted)}
+.doc-title{font:400 32px/1.6 var(--min);letter-spacing:.08em;margin:12px 0 10px;max-width:640px}
+.doc-meta{font-size:11px;color:var(--muted);margin-bottom:48px}
+.doc-body{max-width:600px;font-size:15px;line-height:2.2}
+.doc-body p,.doc-body ul{margin:0 0 24px}
+.doc-body h2{font:500 15px var(--min);letter-spacing:.2em;margin:44px 0 12px}
+.section-label{font:400 11px var(--font)!important;color:var(--shu);letter-spacing:.4em!important}
+.doc-body ul{list-style:none;padding:0}
+.doc-body li::before{content:"・";color:var(--muted)}
+blockquote{margin:40px 0;padding:0 0 0 24px;border-left:1px solid var(--shu);font:400 18px/2 var(--min);color:#555}
+.my-note{background:#f3f0e9;padding:20px 24px;font-size:14px}
+.doc-foot{display:flex;gap:30px;margin-top:60px;font-size:10px;color:var(--muted)}
+</style>
+</head>
+<body>
+<script src="app.js"></script>
+</body>
+</html>

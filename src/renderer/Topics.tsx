@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Plus } from 'lucide-react'
 import type { Note } from '../shared/types'
 import { sortTopics } from '../shared/topics'
@@ -11,6 +11,8 @@ export function Topics({ notes, selected, busy, create, open, complete }: {
 }) {
   const [title, setTitle] = useState('')
   const submitting = useRef(false)
+  const [pending, setPending] = useState<Record<string, boolean>>({})
+  useEffect(() => { if (!busy) setPending({}) }, [busy])
   const sorted = sortTopics(notes)
   return <>
     <form className="topic-create" onSubmit={async e => {
@@ -28,7 +30,7 @@ export function Topics({ notes, selected, busy, create, open, complete }: {
         return <section key={String(completed)} aria-label={completed ? '已写完的选题' : '未完成的选题'}>
           <h2>{completed ? '已写完' : '待写'}<small>{group.length}</small></h2>
           {group.map(n => <div key={n.id} className={`topic-row ${completed ? 'completed' : ''} ${selected === n.id ? 'selected' : ''}`}>
-            <input type="checkbox" checked={completed} disabled={busy} aria-label={`标记 ${n.title} 已写完`} onChange={() => complete(n.id)}/>
+            <input type="checkbox" checked={pending[n.id] ?? completed} disabled={busy} aria-label={`标记 ${n.title} 已写完`} onChange={() => { setPending(v => ({ ...v, [n.id]: !completed })); complete(n.id) }}/>
             <button onClick={() => open(n.id)} title={n.title}>{n.title}</button>
           </div>)}
           {!group.length && <p className="topic-empty">{completed ? '写完后勾选，选题会收在这里。' : '记下标题，留待慢慢展开。'}</p>}

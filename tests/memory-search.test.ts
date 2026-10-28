@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { autoStatus, isPartialMemory, memoryMatches, parseMemoryQuery } from '../src/renderer/Memory'
+import { autoStatus, compareMemoryTime, isPartialMemory, memoryMatches, parseMemoryQuery } from '../src/renderer/Memory'
 import type { ArchiveProgress, BookmarkGuardInfo, Note } from '../src/shared/types'
 
 const note = (extra: Partial<Note>): Note => ({ id: 'n', kind: 'memory', title: '星舰第五次试飞', body: '# X 原文\n\n助推器被机械臂夹住', hash: 'h', path: 'memories/n.md', tags: [], createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z', author: 'ElonMusk', source: 'https://x.com/elonmusk/status/1', ...extra })
@@ -72,5 +72,27 @@ describe('自动采集状态行', () => {
     expect(autoStatus({ enabled: true, active: false, skip: { reason: 'login', at: '' } }, bookmarks, archive, '', now).login).toBe(true)
     expect(autoStatus({ enabled: true, active: false, skip: { reason: 'cooldown', at: '', until: '2026-10-23T16:30:00' } }, bookmarks, archive, '', now).text).toBe('X 限流冷却中，16:30 后自动恢复')
     expect(autoStatus({ enabled: true, active: false }, { ...bookmarks, newToday: 200 }, archive, '', now).text).toBe('今日额度已满，明天继续')
+  })
+})
+
+describe('记忆按时间从新到老排序', () => {
+  const order = (items: Note[]) => [...items].sort(compareMemoryTime).map(n => n.id)
+  it('按发布时间倒序，与修改时间无关', () => {
+    expect(order([
+      note({ id: 'old', publishedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-10-27T00:00:00Z' }),
+      note({ id: 'new', publishedAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00Z' }),
+      note({ id: 'mid', publishedAt: '2026-05-01T00:00:00.000Z' }),
+    ])).toEqual(['new', 'mid', 'old'])
+  })
+  it('没有发布时间时用保存时间，无法解析的排最后', () => {
+    expect(order([
+      note({ id: 'bad', createdAt: 'not-a-date' }),
+      note({ id: 'saved', createdAt: '2026-06-01T00:00:00Z' }),
+      note({ id: 'published', publishedAt: '2026-03-01T00:00:00.000Z', createdAt: '2026-10-01T00:00:00Z' }),
+    ])).toEqual(['saved', 'published', 'bad'])
+  })
+  it('同一时间按固定顺序，不随输入顺序变化', () => {
+    const a = note({ id: 'a', publishedAt: '2026-05-01T00:00:00.000Z' }), b = note({ id: 'b', publishedAt: '2026-05-01T00:00:00.000Z' })
+    expect(order([a, b])).toEqual(order([b, a]))
   })
 })

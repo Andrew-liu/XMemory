@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XMemeory 风格预览 · 六版</title>
+<style>
+*{box-sizing:border-box;margin:0}
+body{background:#18181b;color:#e4e4e7;font:14px/1.6 "Inter","PingFang SC","Microsoft YaHei",sans-serif;padding:32px 40px 60px}
+h1{font-size:22px;font-weight:700}
+.lead{color:#a1a1aa;margin:6px 0 26px;max-width:880px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:26px}
+.item{background:#232327;border:1px solid #2e2e33;border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.frame{position:relative;aspect-ratio:16/10;overflow:hidden;background:#000}
+.frame iframe{position:absolute;left:0;top:0;width:1440px;height:900px;border:0;transform-origin:0 0;pointer-events:none}
+.info{padding:14px 18px;display:flex;gap:14px;align-items:flex-start}
+.no{font:800 26px/1 Georgia,serif;color:#52525b}
+.info h2{font-size:16px}
+.info p{color:#a1a1aa;font-size:13px}
+.info a{margin-left:auto;white-space:nowrap;color:#18181b;background:#ffe14d;border-radius:99px;padding:5px 14px;font-weight:700;text-decoration:none;font-size:12px}
+</style>
+</head>
+<body>
+<h1>XMemeory 风格预览 · 六版</h1>
+<p class="lead">六版用的是同一份结构和合成数据，区别只在样式。缩略图仅供浏览，点“全屏打开”后可以搜索、点击条目。所有版本的搜索关键词都用黄色高亮，点击条目时列表顺序不变。</p>
+<div class="grid" id="grid"></div>
+<script>
+(function () {
+  'use strict'
+  const styles = [
+    ['01-editorial.html', '杂志编辑', '米色纸张、衬线大标题、朱红点缀、双线分隔、首字下沉，阅读感像在看一份刊物。'],
+    ['02-terminal.html', '终端', '黑底绿字、等宽字体、命令行符号和光标闪烁，信息密度高，适合键盘党。'],
+    ['03-brutalism.html', '新粗野', '粗黑边框、硬投影、荧光绿/粉/蓝撞色色块，按钮可以“按下去”。'],
+    ['04-glass.html', '极光玻璃', '流动极光背景、毛玻璃面板、圆角胶囊控件，深色、通透、偏现代。'],
+    ['05-zen.html', '和风极简', '大面积留白、细线、竖排标语、靛蓝与朱红小圆点，安静克制。'],
+    ['06-notebook.html', '手账卡片', '牛皮纸侧栏、便签纸、胶带卡片、方格纸正文、手写字体，温暖随性。']
+  ]
+  const grid = document.getElementById('grid')
+  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n }
+  styles.forEach(([file, name, desc], i) => {
+    const item = el('div', 'item')
+    const frame = el('div', 'frame')
+    const iframe = document.createElement('iframe')
+    iframe.src = file; iframe.title = name; iframe.loading = 'lazy'; iframe.tabIndex = -1
+    frame.appendChild(iframe)
+    const info = el('div', 'info')
+    const text = el('div'); text.append(el('h2', '', name), el('p', '', desc))
+    const link = el('a', '', '全屏打开'); link.href = file; link.target = '_blank'; link.rel = 'noopener'
+    info.append(el('span', 'no', String(i + 1).padStart(2, '0')), text, link)
+    item.append(frame, info)
+    grid.appendChild(item)
+  })
+  const fit = () => document.querySelectorAll('.frame').forEach(f => { f.firstChild.style.transform = `scale(${f.clientWidth / 1440})` })
+  window.addEventListener('resize', fit); fit()
+})()
+</script>
+</body>
+</html>

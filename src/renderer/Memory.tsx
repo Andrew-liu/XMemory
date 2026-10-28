@@ -23,6 +23,22 @@ export function parseMemoryQuery(input: string): ParsedMemoryQuery {
   return parsed
 }
 
+/** Words to highlight in memory titles/bodies: plain terms only (the @author and 不完整 filters are not body text). */
+export function memoryHighlightQuery(input: string) { return parseMemoryQuery(input).terms.join(' ') }
+/** Author filters, for highlighting the matched part of @author labels. */
+export function memoryAuthorQuery(input: string) { return parseMemoryQuery(input).authors.join(' ') }
+
+/** Shown memory time: X publish time when known, otherwise when it was saved. Unparseable values sort last. */
+export function memoryTime(note: Note) {
+  const time = Date.parse(note.publishedAt || note.createdAt)
+  return Number.isNaN(time) ? -Infinity : time
+}
+/** Newest first by the time shown on each memory; ties keep a fixed order so the list never shuffles. */
+export function compareMemoryTime(a: Note, b: Note) {
+  const diff = memoryTime(b) - memoryTime(a)
+  return (Number.isNaN(diff) ? 0 : diff) || b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)
+}
+
 export function memoryMatches(note: Note, query: string) {
   const parsed = parseMemoryQuery(query)
   if (parsed.partial && !isPartialMemory(note)) return false
