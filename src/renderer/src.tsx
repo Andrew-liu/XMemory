@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Search, Lightbulb, Layers, Feather, Settings2, Plus, PanelLeft, ArrowUpRight, RefreshCw, Trash2, FolderOpen, Sun, Moon, Monitor, X, GitBranch, AlertCircle, Check } from 'lucide-react'
 import type { Note, Snapshot, Kind, SearchHit, Conflict } from '../shared/types'
@@ -10,12 +10,13 @@ import './style.css'
 import { Topics } from './Topics'
 import { topicTemplate } from '../shared/topics'
 import { Calendar } from './Calendar'
-import { AutoCollectBar, AUTO_CONFIRM, AUTO_TIP, MemorySearch, autoStatus, compareMemoryTime, isPartialMemory, memoryAuthorQuery, memoryHighlightQuery, memoryMatches, retryStatus } from './Memory'
+import { AutoCollectBar, AUTO_CONFIRM, AUTO_TIP, MemorySearch, autoStatus, compareMemoryTime, isPartialMemory, memoryAuthorQuery, memoryHighlightQuery, memoryMatchesParsed, parseMemoryQuery, retryStatus } from './Memory'
 import { dateKey, noteDate } from '../shared/calendar'
 import { matchSnippet, splitDifference, splitMatches, stableOrder } from './highlight'
 import { conflictFields, normalizeLines } from '../shared/conflicts'
 import { applyCachedTheme, applyTheme, watchSystemTheme } from './themes'
 
+const LIST_BATCH = 60
 type Page = Exclude<Kind, 'draft'> | 'search' | 'settings' | 'conflicts' | 'trash'
 const titles: Record<Page | Kind,string> = { inspiration: '灵感', memory: '记忆', draft: '候选稿', topic: '选题', search: '搜索', settings: '设置', conflicts: '冲突', trash: '回收站' }
 function HighlightedText({ text, query }: { text: string; query: string }) {
@@ -84,7 +85,7 @@ function App() {
     const key = JSON.stringify([query, filter, dateFrom, dateTo, author, tag, sort])
     const timer = setTimeout(() => { void window.xm.search({ query, kind: (filter || undefined) as Kind|undefined, author: author || undefined, tag: tag || undefined, from: dateFrom || undefined, to: dateTo || undefined, sort }).then(v => { if (alive) setHits({ key, items: v }) }).catch(e => setError(e.message)) }, 150)
     return () => { alive = false; clearTimeout(timer) }
-  }, [query, filter, dateFrom, dateTo, author, tag, sort, state?.notes])
+  }, [query, filter, dateFrom, dateTo, author, tag, sort, page === 'search' ? state?.notes : undefined])
   // Opening or autosaving a note changes its updatedAt; without this the clicked item jumps while the user is reading the list.
   const listOrder = useRef<{ key: string; ids: string[] }>({ key: '', ids: [] })
   async function go(next: Page) { try { await editor.current?.flush(); setPage(next); setSelected(''); setSearchLocation(undefined); setRunStatus('') } catch(e) { setError((e as Error).message) } }
@@ -105,15 +106,27 @@ function App() {
   }
 
   const note = state?.notes.find(n => n.id === selected)
-  const notes = state?.notes.filter(n => page === 'trash' ? n.deleted : !n.deleted && n.kind === page).filter(n => page !== 'memory' || memoryMatches(n, memoryQuery)).sort((a,b) => page === 'memory' ? compareMemoryTime(a, b) : b.updatedAt.localeCompare(a.updatedAt)) || []
-  const listKey = page === 'search' ? `search|${hits.key}` : `${page}|${page === 'memory' ? memoryQuery : ''}`
+  // Typing stays responsive: the input updates immediately, the (expensive) filtered list follows at lower priority.
+  const deferredMemoryQuery = useDeferredValue(memoryQuery)
+  const allNotes = state?.notes
+  const notes = useMemo(() => {
+    if (!allNotes) return []
+    const parsed = page === 'memory' ? parseMemoryQuery(deferredMemoryQuery) : undefined
+    return allNotes.filter(n => page === 'trash' ? n.deleted : !n.deleted && n.kind === page).filter(n => !parsed || memoryMatchesParsed(n, parsed)).sort((a,b) => page === 'memory' ? compareMemoryTime(a, b) : b.updatedAt.localeCompare(a.updatedAt))
+  }, [allNotes, page, deferredMemoryQuery])
+  const listKey = page === 'search' ? `search|${hits.key}` : `${page}|${page === 'memory' ? deferredMemoryQuery : ''}`
   const rawList: (Note | SearchHit)[] = page === 'search' ? hits.items : notes
   const shownList = listOrder.current.key === listKey ? stableOrder(listOrder.current.ids, rawList) : rawList
   listOrder.current = { key: listKey, ids: shownList.map(n => n.id) }
-  const markQuery = page === 'search' ? query : page === 'memory' ? memoryHighlightQuery(memoryQuery) : ''
-  const authorMark = page === 'memory' ? memoryAuthorQuery(memoryQuery) : ''
+  const markQuery = page === 'search' ? query : page === 'memory' ? memoryHighlightQuery(deferredMemoryQuery) : ''
+  const authorMark = page === 'memory' ? memoryAuthorQuery(deferredMemoryQuery) : ''
   const memoryView = state?.settings.memoryView === 'card' ? 'card' : 'list'
-  const partialCount = state?.notes.filter(n => n.kind === 'memory' && !n.deleted && isPartialMemory(n)).length || 0
+  const partialCount = useMemo(() => allNotes?.filter(n => n.kind === 'memory' && !n.deleted && isPartialMemory(n)).length || 0, [allNotes])
+  // Render the list in slices: thousands of cards with highlighted snippets are what froze the window.
+  const [shownCount, setShownCount] = useState(LIST_BATCH)
+  useEffect(() => { setShownCount(LIST_BATCH) }, [listKey])
+  const visibleList = shownList.length > shownCount ? shownList.slice(0, shownCount) : shownList
+  const loadMore = (e: React.UIEvent<HTMLDivElement>) => { const el = e.currentTarget; if (shownCount < shownList.length && el.scrollTop + el.clientHeight > el.scrollHeight - 600) setShownCount(count => count + LIST_BATCH) }
   const collectingNow = !!state?.auto.active || recollecting
   function setAutoCollect(enabled: boolean) {
     if (enabled && !window.confirm(AUTO_CONFIRM)) return
@@ -186,7 +199,7 @@ function App() {
           <div className="list-heading"><div><span className="eyebrow">{page === 'search' ? '全部已保存内容' : page === 'memory' ? '从收藏到积累' : page === 'topic' ? '给长文一个起点' : '随时记录'}</span><h1>{titles[page]}<small>{page === 'search' ? hits.items.length : notes.length}</small></h1></div>{page === 'inspiration' && <button title="新建灵感" onClick={() => void create()}><Plus size={21}/></button>}</div>
           {page === 'search' && <div className="search-controls"><div className="search-field"><Search size={17}/><input ref={searchInput} autoFocus placeholder="搜索灵感、记忆、选题和候选稿…" value={query} onChange={e => setQuery(e.target.value)}/></div><div className="filter-row"><select aria-label="内容类型" value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部类型</option><option value="inspiration">灵感</option><option value="memory">记忆</option><option value="draft">候选稿</option><option value="topic">选题</option></select><select value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="relevance">相关度</option><option value="date">最近修改</option></select></div><details><summary>更多筛选</summary><input placeholder="作者" value={author} onChange={e=>setAuthor(e.target.value)}/><input placeholder="标签" value={tag} onChange={e=>setTag(e.target.value)}/><input aria-label="起始日期" type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/><input aria-label="结束日期" type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}/></details></div>}
           {page === 'memory' && <AutoCollectBar view={autoStatus(state.auto, state.bookmarks, state.archive, state.xStatus)} toggle={() => setAutoCollect(!state.auto.enabled)} login={() => void go('settings')}/>}
-          {page === 'topic' ? <Topics notes={notes} selected={selected} busy={topicBusy} create={createTopic} open={id => void open(id)} complete={id => void complete(id)}/> : <div className={`list-scroll ${page==='memory' && memoryView==='card' ? 'card-grid' : ''}`}>{shownList.map(n => <button key={n.id} className={`note-card ${selected === n.id ? 'selected' : ''} ${page==='memory' && memoryView==='card' ? 'memory-tile' : ''}`} onClick={() => void open(n.id, markQuery)}><div className="card-top"><span>{n.author ? <>@<HighlightedText text={n.author} query={authorMark}/></> : titles[n.kind]}</span><time title={page==='memory'?'发布时间':'最近修改'}>{new Date(page === 'memory' ? n.publishedAt || n.createdAt : n.updatedAt).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'})}</time></div><h3 style={{textDecoration:n.completed?'line-through':undefined}}><HighlightedText text={n.title} query={markQuery}/>{n.completed && (n.kind === 'topic' ? ' · 已写完' : ' · 已使用')}</h3><p>{page === 'search' ? <HighlightedText text={(n as SearchHit).snippet} query={markQuery}/> : markQuery ? <HighlightedText text={matchSnippet(n.body.replace(/[#*\[\]]/g,''), markQuery)} query={markQuery}/> : n.body.replace(/[#*\[\]]/g,'').slice(0,140) || '写下第一个念头…'}</p><div className="card-bottom">{n.partial ? <span>正文不完整</span> : n.tags.length ? n.tags.map(t=><span key={t}>#{t}</span>) : /!\[[^\]]*]\([^)]+\)/.test(n.body) ? <span>含图片</span> : <span>Markdown</span>}{n.kind === 'draft' && <Feather size={12}/>}</div></button>)}{!shownList.length && <div className="list-empty">{page === 'search' ? '没有找到匹配内容，试试其他关键词或清除筛选。' : page === 'memory' ? memoryQuery ? '没有匹配的记忆，试试其他关键词或清空搜索。' : state.auto.enabled ? '还没有记忆。自动采集会每小时把 X 书签保存到这里。' : '还没有记忆。开启自动采集后，X 书签会每小时保存到这里。' : '这里还没有内容。'}</div>}</div>}
+          {page === 'topic' ? <Topics notes={notes} selected={selected} busy={topicBusy} create={createTopic} open={id => void open(id)} complete={id => void complete(id)}/> : <div className={`list-scroll ${page==='memory' && memoryView==='card' ? 'card-grid' : ''}`} onScroll={loadMore}>{visibleList.map(n => <button key={n.id} className={`note-card ${selected === n.id ? 'selected' : ''} ${page==='memory' && memoryView==='card' ? 'memory-tile' : ''}`} onClick={() => void open(n.id, markQuery)}><div className="card-top"><span>{n.author ? <>@<HighlightedText text={n.author} query={authorMark}/></> : titles[n.kind]}</span><time title={page==='memory'?'发布时间':'最近修改'}>{new Date(page === 'memory' ? n.publishedAt || n.createdAt : n.updatedAt).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'})}</time></div><h3 style={{textDecoration:n.completed?'line-through':undefined}}><HighlightedText text={n.title} query={markQuery}/>{n.completed && (n.kind === 'topic' ? ' · 已写完' : ' · 已使用')}</h3><p>{page === 'search' ? <HighlightedText text={(n as SearchHit).snippet} query={markQuery}/> : markQuery ? <HighlightedText text={matchSnippet(n.body.replace(/[#*\[\]]/g,''), markQuery)} query={markQuery}/> : n.body.replace(/[#*\[\]]/g,'').slice(0,140) || '写下第一个念头…'}</p><div className="card-bottom">{n.partial ? <span>正文不完整</span> : n.tags.length ? n.tags.map(t=><span key={t}>#{t}</span>) : /!\[[^\]]*]\([^)]+\)/.test(n.body) ? <span>含图片</span> : <span>Markdown</span>}{n.kind === 'draft' && <Feather size={12}/>}</div></button>)}{shownList.length > visibleList.length && <button className="link-button list-more" onClick={() => setShownCount(count => count + LIST_BATCH)}>显示更多（还有 {shownList.length - visibleList.length} 条）</button>}{!shownList.length && <div className="list-empty">{page === 'search' ? '没有找到匹配内容，试试其他关键词或清除筛选。' : page === 'memory' ? deferredMemoryQuery ? '没有匹配的记忆，试试其他关键词或清空搜索。' : state.auto.enabled ? '还没有记忆。自动采集会每小时把 X 书签保存到这里。' : '还没有记忆。开启自动采集后，X 书签会每小时保存到这里。' : '这里还没有内容。'}</div>}</div>}
           {page === 'memory' && note && isPartialMemory(note) && <p className="setting-detail" aria-label="不完整记忆补采状态">{retryStatus(state.partialRetries[note.id])}</p>}
           <footer className="list-footer"><span>保存在你的设备上</span><FolderOpen size={13}/></footer>
         </section>

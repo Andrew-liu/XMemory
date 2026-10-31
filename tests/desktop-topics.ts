@@ -76,7 +76,7 @@ try {
     const png = nativeImage.createFromBitmap(Buffer.alloc(80 * 60 * 4, 255), { width: 80, height: 60 }).toPNG()
     await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) })])
   })
-  await page.keyboard.press('Control+V')
+  await page.keyboard.press('ControlOrMeta+V')
   const image = page.locator('.tiptap img.local-image')
   await expect(image).toBeVisible()
   await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(80)

@@ -62,7 +62,7 @@ it('远端仅一个正文变化只下载一个文件，正确回读', async () =
 it.each(['missing', 'corrupt'] as const)('缓存 %s 安全回退下载，缓存不参与远端同步', async mode => {
   const t = setup(); await t.run()
   const scope = hash(JSON.stringify(['example/synthetic', 'master'])).slice(0, 24)
-  const file = path.join(t.l.root, 'local/sync-cache', scope, gitBlobHash(t.files.get(t.n.path)!))
+  const file = path.join(t.l.root, '.xmemeory/local/sync-cache', scope, gitBlobHash(t.files.get(t.n.path)!))
   if (mode === 'missing') unlinkSync(file); else writeFileSync(file, '损坏缓存')
   t.l.save({ ...t.l.get(t.n.id), body: '本地修改' }, t.l.get(t.n.id).hash)
   await t.run(); expect(t.gets()).toBe(1)
@@ -70,16 +70,16 @@ it.each(['missing', 'corrupt'] as const)('缓存 %s 安全回退下载，缓存�
 })
 it('双端修改保留冲突，图片已知内容不重复下载', async () => {
   const t = setup(); const picture = Buffer.from([1, 2, 3, 4])
-  t.files.set('assets/synthetic.png', picture)
+  t.files.set('attachments/synthetic.png', picture)
   await t.run(); expect(t.gets()).toBe(1)
   t.l.save({ ...t.l.get(t.n.id), body: '本地修改' }, t.l.get(t.n.id).hash)
   t.files.set(t.n.path, Buffer.from(t.files.get(t.n.path)!.toString().replace('原正文', '远端修改')))
   await t.run(); expect(t.gets()).toBe(2); expect(t.l.conflicts.size).toBe(1)
-  expect(readFileSync(path.join(t.l.root, 'assets/synthetic.png'))).toEqual(picture)
+  expect(readFileSync(path.join(t.l.root, 'attachments/synthetic.png'))).toEqual(picture)
 })
 it('提交失败不前移基线，重试复用已下载的远端版本', async () => {
   const t = setup(); await t.run()
-  const baseline = path.join(t.l.root, 'local', `sync-${hash('example/syntheticmaster').slice(0,16)}.json`)
+  const baseline = path.join(t.l.root, '.xmemeory', 'local', `sync-${hash('example/syntheticmaster').slice(0,16)}.json`)
   const before = readFileSync(baseline, 'utf8')
   t.files.set(t.n.path, Buffer.from(t.files.get(t.n.path)!.toString().replace('原正文', '远端修改')))
   t.l.save({ ...t.l.get(t.n.id), body: '本地修改' }, t.l.get(t.n.id).hash)

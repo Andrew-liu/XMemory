@@ -2,6 +2,7 @@ import { Node, mergeAttributes } from '@tiptap/core'
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react'
 import { useEffect, useState } from 'react'
 import type { Note } from '../shared/types'
+import { assetURL } from '../shared/assets'
 
 export function resolveLink(notes: Note[], target: string, from = '') {
   const name = target.split('#')[0].replace(/\.md$/, '')
@@ -17,14 +18,15 @@ function WikiView({ node, extension }: NodeViewProps) {
   const { target, label, embed } = node.attrs
   const options = extension.options as { notes: () => Note[]; path: () => string; open: (id: string) => void }
   const note = resolveLink(options.notes(), target, options.path())
-  const [image, setImage] = useState('')
+  const [failed, setFailed] = useState(false)
   const imageTarget = /\.(png|jpe?g|webp|gif)$/i.test(target)
-  useEffect(() => { if (embed && imageTarget) void window.xm.asset(target, options.path()).then(setImage).catch(() => setImage('')) }, [target, embed, imageTarget])
+  const image = embed && imageTarget && !failed ? assetURL(target, options.path()) : ''
+  useEffect(() => { setFailed(false) }, [target])
   let excerpt = note?.body || ''
   const heading = target.split('#')[1]
   if (heading) { const lines = excerpt.split('\n'); const at = lines.findIndex(l => l.replace(/^#+\s*/, '') === heading); excerpt = at >= 0 ? lines.slice(at, at+14).join('\n') : '未找到此标题' }
   return <NodeViewWrapper as="span" className={embed ? 'wiki-embed' : 'wiki-link'} contentEditable={false}>
-    {embed && imageTarget ? image ? <img src={image} alt={target} style={{ maxWidth: /^\d+$/.test(label) ? Number(label) : undefined }} /> : <span>图片缺失：{target}</span>
+    {embed && imageTarget ? image ? <img src={image} alt={target} onError={() => setFailed(true)} style={{ maxWidth: /^\d+$/.test(label) ? Number(label) : undefined }} /> : <span>图片缺失：{target}</span>
       : <span onClick={() => note && options.open(note.id)} role="link" tabIndex={0} onKeyDown={e => e.key === 'Enter' && note && options.open(note.id)}>
         <span>{embed ? '↗ ' : '[['}{label || target}{!embed && ']]'}{!note && ' · 未找到或重名'}</span>
         {embed && note && <span className="embed-excerpt">{excerpt.slice(0, 700)}</span>}

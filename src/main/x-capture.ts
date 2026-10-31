@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import { chromium, type Browser, type BrowserContext, type Page, type Response } from 'playwright'
 import type { ArchiveProgress, BookmarkGuardInfo, BookmarkRunResult } from '../shared/types'
 import { bookmarkStopText } from '../shared/bookmarks'
 import { atomic, Library } from './library'
+import { privatePath, relativeImage } from './layout'
 import { BookmarkScanner, bookmarkSummary, RiskGuard, DAILY_ARTICLES, DAILY_NEW } from './x-bookmarks'
 import { XLoginRequired } from './auto-collect'
 import { PartialRetries, mergeCapturedSource, sourceHash } from './partial-retry'
@@ -100,8 +102,16 @@ export async function downloadChromeImage(context: BrowserContext, url: string):
   }
 }
 
-function chromeCandidates() {
-  const roots = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter((value): value is string => !!value)
+/** Places an installed Chrome may live, in preference order. Parameters make this testable on any platform. */
+export function chromeCandidates(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env, home = homedir()) {
+  if (platform === 'darwin') {
+    const apps = ['/Applications', path.join(home, 'Applications')]
+    return apps.flatMap(root => [
+      path.join(root, 'Google Chrome.app/Contents/MacOS/Google Chrome'),
+      path.join(root, 'Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta')
+    ])
+  }
+  const roots = [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA].filter((value): value is string => !!value)
   return roots.flatMap(root => [
     path.join(root, 'Google/Chrome/Application/chrome.exe'),
     path.join(root, 'Google/Chrome Beta/Application/chrome.exe')
@@ -112,10 +122,16 @@ export function findChrome() {
   return chromeCandidates().find(existsSync)
 }
 
+/** Where to look when a leftover Chrome holds the dedicated profile. */
+export const processManagerName = (platform: NodeJS.Platform = process.platform) => platform === 'darwin' ? '活动监视器' : '任务管理器'
+export const chromeMissingMessage = (platform: NodeJS.Platform = process.platform) => platform === 'darwin'
+  ? '未找到 Google Chrome，请先安装正式版 Chrome 并放在“应用程序”文件夹（下载：https://www.google.cn/chrome/ 或 https://www.google.com/chrome/）'
+  : '未找到 Google Chrome，请先安装正式版 Chrome'
+
 async function waitForFile(file: string, process: ChildProcess) {
   const deadline = Date.now() + 20_000
   while (Date.now() < deadline) {
-    if (process.exitCode !== null) throw new Error('Chrome 启动失败：专属 Profile 可能被残留的 Chrome 占用，请在任务管理器结束该 Chrome 后重试')
+    if (process.exitCode !== null) throw new Error(`Chrome 启动失败：专属 Profile 可能被残留的 Chrome 占用，请在${processManagerName()}结束该 Chrome 后重试`)
     if (existsSync(file)) {
       const [port] = readFileSync(file, 'utf8').trim().split(/\r?\n/)
       if (/^\d+$/.test(port)) return port
@@ -165,7 +181,7 @@ export class XCapture {
   private async start() {
     if (this.browser?.isConnected() && this.context) return this.context
     const executable = findChrome()
-    if (!executable) throw new Error('未找到 Google Chrome，请先安装正式版 Chrome')
+    if (!executable) throw new Error(chromeMissingMessage())
     const profile = path.join(this.userData, 'x-cdp-profile')
     mkdirSync(profile, { recursive: true })
     const portFile = path.join(profile, 'DevToolsActivePort')
@@ -243,7 +259,7 @@ export class XCapture {
     if (this.browser?.isConnected() || (this.process && this.process.exitCode === null)) await this.disconnect()
     this.stopped = false
     const executable = findChrome()
-    if (!executable) throw new Error('未找到 Google Chrome，请先安装正式版 Chrome')
+    if (!executable) throw new Error(chromeMissingMessage())
     const profile = path.join(this.userData, 'x-cdp-profile')
     mkdirSync(profile, { recursive: true })
     this.loginProcess = spawn(executable, chromeArgs(profile, 'login'), { stdio: 'ignore', windowsHide: false })
@@ -320,7 +336,8 @@ export class XCapture {
     const replacements: Record<string, string> = {}
     const failures: string[] = []
     const noteId = `x-${account}-${captured.post.id}`
-    const notePath = this.library.notes.get(noteId)?.path || (/^\d+$/.test(account) ? `memories/${account}/${captured.post.id}.md` : `memories/${noteId}.md`)
+    // New memories are always saved as memories/<year>/<name>.md, so any two-level path gives the same relative image links.
+    const notePath = this.library.notes.get(noteId)?.path || 'memories/0000/new.md'
     let processed = 0
     for (const url of captured.post.images) {
       if (this.stopped) throw new Error('采集已暂停')
@@ -332,7 +349,7 @@ export class XCapture {
         try {
           const bytes = await downloadChromeImage(this.context, candidate)
           const asset = this.library.addImage(bytes, captured.post.id)
-          const relative = path.posix.relative(path.posix.dirname(notePath), asset)
+          const relative = relativeImage(asset, notePath)
           replacements[url] = relative
           markdown = markdown.replaceAll(`(${url})`, `(${relative})`)
           downloaded.push(url)
@@ -549,7 +566,7 @@ export class XCapture {
     if (expectedSourceHash && this.stopped) throw new Error('补采已暂停')
     const noteId = `x-${account}-${captured.post.id}`
     const existing = this.library.notes.get(noteId)
-    const captureFile = path.join(this.library.root, 'metadata', `${noteId}.capture.json`)
+    const captureFile = privatePath(this.library.root, 'metadata', `${noteId}.capture.json`)
     let previousHash: string | undefined
     try { previousHash = JSON.parse(readFileSync(captureFile, 'utf8')).sourceHash } catch { /* Legacy capture. */ }
     const title = memoryTitle(captured.post, captured.articleTitle)

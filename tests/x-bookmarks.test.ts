@@ -5,7 +5,7 @@ import { BookmarkScanner, RiskGuard, type ScannerDeps } from '../src/main/x-book
 
 const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/tests')
 mkdirSync(temporary, { recursive: true })
-const root = () => { const dir = mkdtempSync(path.join(temporary, 'guard-')); mkdirSync(path.join(dir, 'local'), { recursive: true }); return dir }
+const root = () => { const dir = mkdtempSync(path.join(temporary, 'guard-')); mkdirSync(path.join(dir, '.xmemeory', 'local'), { recursive: true }); return dir }
 const tweet = (id: string, extra: Record<string, unknown> = {}) => ({ __typename: 'Tweet', rest_id: id, legacy: { full_text: `合成推文 ${id}`, truncated: false, entities: { urls: [] } }, core: { user_results: { result: { legacy: { screen_name: `user${id}` } } } }, ...extra })
 const articleTweet = (id: string) => tweet(id, { legacy: { full_text: `长文 ${id} https://t.co/x`, truncated: false, entities: { urls: [{ url: 'https://t.co/x', expanded_url: `https://x.com/i/article/${id}` }] } } })
 const entry = (result: unknown) => ({ entryId: `tweet-${(result as any)?.rest_id || 'x'}`, content: { entryType: 'TimelineTimelineItem', itemContent: { itemType: 'TimelineTweet', tweet_results: { result } } } })

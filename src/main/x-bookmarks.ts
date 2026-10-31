@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { atomic } from './library'
+import { privatePath } from './layout'
 import { bookmarkEntries, captureFromPayload } from './x-parse'
 import type { BookmarkGuardInfo, BookmarkRunResult } from '../shared/types'
 
@@ -49,7 +50,7 @@ export class RiskGuard {
   readonly file: string
   state: GuardState
   constructor(root: string, account: string) {
-    this.file = path.join(root, 'local', `x-bookmarks-${/^\d+$/.test(account) ? account : 'cdp'}.json`)
+    this.file = privatePath(root, 'local', `x-bookmarks-${/^\d+$/.test(account) ? account : 'cdp'}.json`)
     this.state = readGuardState(this.file)
   }
   static read(file: string) { return existsSync(file) ? readGuardState(file) : undefined }
@@ -76,7 +77,7 @@ export class RiskGuard {
   save() { atomic(this.file, JSON.stringify(this.state, null, 2)) }
 }
 export function bookmarkSummary(root: string): BookmarkGuardInfo {
-  const dir = path.join(root, 'local')
+  const dir = privatePath(root, 'local')
   let state: GuardState | undefined
   let latest = 0
   try {

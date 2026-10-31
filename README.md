@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.6.0-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
+[![version](https://img.shields.io/badge/version-0.7.0-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
 [![electron](https://img.shields.io/badge/Electron-44-b8412c?style=flat-square&labelColor=2e4a62&logo=electron&logoColor=white)](https://www.electronjs.org/) [![react](https://img.shields.io/badge/React-19-b8412c?style=flat-square&labelColor=2e4a62&logo=react&logoColor=white)](https://react.dev/) [![typescript](https://img.shields.io/badge/TypeScript-7-b8412c?style=flat-square&labelColor=2e4a62&logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![local-first](https://img.shields.io/badge/data-local--first-b8412c?style=flat-square&labelColor=2e4a62)](#数据与隐私) [![stars](https://img.shields.io/github/stars/Andrew-liu/XMemory?style=flat-square&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/stargazers)
 
 </div>
@@ -138,6 +138,8 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 - 跳过未变化文件的下载，复用已校验的本地内容或缓存；显示本轮拉取、上传、下载与复用数量。
 - 冲突时保留双方，展示正文与附加字段差异，可选择版本、保留两份或手动合并；仅换行格式或 YAML 写法不同时不产生冲突。
 - 删除的内容进入回收站，支持恢复。
+- 资料库可直接用 Obsidian 打开：在 Obsidian 选择“打开本地仓库”，指向资料库文件夹即可。文件树里只有 `inspirations/`、`memories/`、`topics/`、`drafts/` 和图片目录 `attachments/`；记忆按 `memories/年份/日期 作者 - 标题.md` 命名，属性使用 `aliases`、`created`、`published` 等 Obsidian 字段，双链和图片两边都能显示。应用自己的数据（索引、同步状态、回收站、升级备份）都在隐藏目录 `.xmemeory/`。目前建议在 Obsidian 中只阅读，不在其中改动。
+- 从 0.6.x 升级时，首次启动会自动把旧资料库升级为新结构：先完整备份到 `.xmemeory/backup-<时间>/`，校验通过才算完成，失败会自动恢复原状。已同步的 GitHub 仓库由第一台升级的设备自动升级；其他设备也需要升级到 0.7.0 才能继续同步，旧版会提示版本不兼容并停止，不会改动远端。
 
 </details>
 
@@ -146,7 +148,7 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 
 - 和纸主题提供亮色、暗色和跟随系统三种模式；主按钮在任何模式下都与背景保持明显对比。
 - 正文与标题使用思源宋体，字体随应用打包，离线也能正确显示。
-- 支持关闭窗口后驻留托盘；可在设置中开启开机自启（默认关闭，仅安装版可用），开机后只在托盘中启动。若本机已开启自动采集，启动后等待约 3～8 分钟再开始首轮。
+- 支持关闭窗口后驻留托盘（macOS 为菜单栏图标，点击 Dock 图标可重新显示窗口）；可在设置中开启开机自启（默认关闭，仅安装版可用），开机后只在托盘中启动。若本机已开启自动采集，启动后等待约 3～8 分钟再开始首轮。
 - 设置页“关于”显示实际运行版本与应用源码仓库；它不同于你自己配置的 GitHub 私有数据同步仓库。
 
 </details>
@@ -155,10 +157,15 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 
 在 [Releases](https://github.com/Andrew-liu/XMemory/releases) 页面下载 Windows 安装版（`XMemeory.Setup.<版本>.exe`）或免安装版（`XMemeory-<版本>-win-x64.zip`，完整解压后运行文件夹里的 `XMemeory.exe`）。源码通过 Git 版本标签发布，也可按下文自行构建。
 
-- 运行环境：Windows 10/11 x64
-- X 书签采集：需要本机安装正式版 Google Chrome
-- 数据目录：`%APPDATA%\XMemeory`，安装版与免安装版共用
-- 安装包未签名，首次运行可能出现 Windows SmartScreen 提示
+- Windows：Windows 10/11 x64；数据目录 `%APPDATA%\XMemeory`，安装版与免安装版共用；安装包未签名，首次运行可能出现 SmartScreen 提示。
+- macOS：仅支持 Apple Silicon（arm64），系统 macOS 13 及以上；使用 `pack:mac` 自行构建 `.dmg` 或 `.zip`，数据目录 `~/Library/Application Support/xmemeory`。
+- X 书签采集：需要本机安装正式版 Google Chrome（macOS 放在“应用程序”文件夹）。
+
+**macOS 首次打开**：应用没有 Apple 开发者签名与公证，只做了临时签名，首次打开会被系统拦截。任选一种放行方式：
+
+1. 把 `XMemeory.app` 拖进“应用程序”，在访达中按住 Control 点按图标，选“打开”，再在弹窗里点“打开”。
+2. 或在“系统设置 → 隐私与安全性”底部找到“仍要打开”。
+3. 或在终端执行 `xattr -dr com.apple.quarantine /Applications/XMemeory.app`。
 
 ## 开发与构建
 
@@ -183,11 +190,11 @@ pnpm pack:win
 pnpm build
 pnpm exec electron-builder --win --x64 --dir
 
-# macOS 安装包（需在 macOS 上执行）
+# macOS Apple Silicon 安装包与 zip（需在 macOS 上执行），输出至 release/
 pnpm pack:mac
 ```
 
-> 打包命令存在不代表已完成跨平台验收与代码签名；macOS 包尚未验收。
+> 两个平台的包都未经开发者签名；macOS 包做了临时签名（ad-hoc）以保证包结构完整，但未公证。0.7.0 的验收在 macOS 上完成，Windows 的回归测试未在本次完成。
 
 ## 测试
 
@@ -206,6 +213,8 @@ pnpm test:memory       # 记忆阅读与排序
 pnpm test:themes       # 和纸亮暗主题与对比度
 pnpm test:recovery     # 单实例与退出恢复
 pnpm test:clean-exit   # 无编辑退出
+pnpm test:migration    # 旧资料库自动升级为 Obsidian 兼容结构
+pnpm test:perf         # 2000 条记忆下搜索、编辑、读图的卡顿阈值
 ```
 
 `tests/` 下另有搜索定位、图片复制、同步缓存、冲突处理等专项，可用 `pnpm exec tsx tests/<文件名>.ts` 运行。设置环境变量 `XMEMEORY_TEST_EXE` 指向打包后的 `XMemeory.exe`，即可对安装包做同样的冒烟测试。Lint 尚未配置。
@@ -216,7 +225,7 @@ pnpm test:clean-exit   # 无编辑退出
 | -------- | ------------------------------------------------- |
 | 桌面外壳 | Electron 44、electron-vite、electron-builder       |
 | 界面     | React 19、TypeScript、Tiptap 3 编辑器、Lucide 图标 |
-| 数据     | Markdown 文件为权威正文，SQLite FTS 为可重建索引  |
+| 数据     | Markdown 文件为权威正文（Obsidian 兼容），SQLite FTS 为可重建索引 |
 | 采集     | Playwright 连接本机 Chrome 独立 Profile           |
 | 同步     | GitHub REST API，私有仓库双向同步                 |
 | 测试     | Vitest 单元测试 + Playwright 驱动的真实窗口测试   |
@@ -227,6 +236,7 @@ pnpm test:clean-exit   # 无编辑退出
 - 不内置任何云端服务，不收集遥测；只有你主动配置的 GitHub 私有仓库会收到同步内容。
 - GitHub Token 使用系统能力在本机加密保存，不写入资料库，也不参与同步。
 - 本地索引可随时从 Markdown 文件完整重建，删除索引不会丢失内容。
+- 升级资料库结构前会自动整体备份；备份在 `.xmemeory/backup-<时间>/`，应用不会自动删除，确认无误后可自行删除。
 
 ## 项目结构
 

@@ -4,7 +4,7 @@
 
 - 本文件适用于 XMemeory 项目根目录及全部子目录；同时遵循上级工作区的 `AGENTS.md`。子目录存在更具体的规则时，操作前先读取。
 - 沟通、开发说明和交付总结默认使用简体中文；代码标识符遵循所选语言及项目惯例。
-- 当前工作区为 v0.6.0（免安装测试包仅本地保留）：Electron + React + TypeScript，Markdown 为权威正文，SQLite 为可重建本地索引；代码仓库为 Andrew-liu/XMemory，源码通过版本标签发布；跨平台安装与签名验收仍待完成。
+- 当前工作区为 v0.7.0：Electron + React + TypeScript，Markdown 为权威正文（资料库兼容 Obsidian，schemaVersion 2，私有数据在 `.xmemeory/`），SQLite 为可重建本地索引；代码仓库为 Andrew-liu/XMemory，源码通过版本标签发布；Mac（Apple Silicon）已适配并验收，Windows 回归与签名公证仍待完成。
 - 项目名称不等于产品需求。未确认前，不预设产品功能、技术栈、数据库、外部服务或部署方式。
 
 ## 开始开发前
@@ -70,7 +70,9 @@
 - 类型检查：`pnpm typecheck`；核心测试：`pnpm test`；桌面测试：先 `pnpm build` 再 `pnpm test:desktop`。
 - 长文选题专项：`pnpm test:topics`（合成资料库，含图片剪贴板验证）；需先构建。
 - 灵感日历专项：`pnpm test:calendar`；单实例与退出恢复：`pnpm test:recovery`；无编辑退出：`pnpm test:clean-exit`；记忆阅读：`pnpm test:memory`。均启动真实 Electron 窗口，先执行构建；可用 `XMEMEORY_TEST_EXE` 指定打包后的程序。
-- 打包：Windows 使用 `pnpm pack:win`；Mac 环境使用 `pnpm pack:mac`。打包命令存在不等于跨平台验收或签名已完成。Lint 尚未配置。
+- 旧库升级专项：`pnpm test:migration`；卡顿阈值专项：`pnpm test:perf`（2000 条合成记忆）。真实 Chrome 测试 `tsx tests/browser-images.ts` 会弹出“focus-sentinel”测试窗口，期间不要点击或关闭它，也不要大量操作电脑，否则会误报失焦。
+- Mac 开发：本机若无全局 pnpm，用 `npx -y pnpm@11.22.0 <命令>` 代替；macOS 没有 `timeout` 命令；测试里的粘贴快捷键写 `ControlOrMeta`。`pack:mac` 在没有全局 pnpm 时需把一个转调 `npx -y pnpm@11.22.0` 的 `pnpm` 垫片放进 PATH（放在 `trash/` 下）。
+- 打包：Windows 使用 `pnpm pack:win`；Mac 环境使用 `pnpm pack:mac`（仅 arm64，临时签名，未公证）。打包命令存在不等于跨平台验收或公证已完成。Lint 尚未配置。
 - 产品是安装到本机的桌面 App。开发服务器仅用于 Electron 开发热更新；生产窗口加载打包内的本地文件，不部署网站。
 
 - 优先小范围、可审查的修改；修改前读取现有内容，保持编码、换行、缩进和命名风格。

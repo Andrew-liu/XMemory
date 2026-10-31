@@ -25,10 +25,10 @@ try {
     const remote = index === 0 ? raw.replace('completed: false', 'completed: true\ncustom: 远端自定义值') : index === 2 ? raw.replace('正文一样', '正文 一样') : raw.replace(/\n/g, '\r\n')
     const incoming = { ...note, hash: hash(remote), body: index === 2 ? '正文 一样\n' : note.body }
     const conflict = { id: `synthetic-${index}`, noteId: note.id, title: note.title, current: note, incoming, createdAt: new Date(Date.UTC(2026, 8, 21, 12, index)).toISOString(), ...(index === 1 ? {} : { currentRaw: raw, incomingRaw: remote }), ...(index === 0 ? { currentMetadata: { completed: false }, incomingMetadata: { completed: true, custom: '远端自定义值' } } : {}) }
-    writeFileSync(path.join(snapshot.library, 'conflicts', `${conflict.id}.json`), JSON.stringify(conflict))
+    writeFileSync(path.join(snapshot.library, '.xmemeory', 'conflicts', `${conflict.id}.json`), JSON.stringify(conflict))
     if (index === 0) for (let duplicate = 1; duplicate < 7; duplicate++) {
       const chained = { ...conflict, id: `synthetic-chain-${duplicate}`, current: { ...note, hash: duplicate < 4 ? `stale-${duplicate % 2}` : note.hash }, createdAt: new Date(Date.UTC(2026, 8, 21, 13, duplicate)).toISOString() }
-      writeFileSync(path.join(snapshot.library, 'conflicts', `${chained.id}.json`), JSON.stringify(chained))
+      writeFileSync(path.join(snapshot.library, '.xmemeory', 'conflicts', `${chained.id}.json`), JSON.stringify(chained))
     }
   }
   // An externally added Markdown file triggers a full library refresh, including conflict files.

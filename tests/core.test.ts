@@ -131,7 +131,7 @@ it.each([
 })
 it('检查连接只读取私库和分支，不上传内容或改写同步状态文件', async () => {
   const l = library()
-  const before = readdirSync(path.join(l.root, 'local')).sort()
+  const before = readdirSync(path.join(l.root, '.xmemeory', 'local')).sort()
   const calls: string[] = []
   const sync = new GithubSync(l, () => {}, async (input, init) => {
     expect(init?.method).toBe('GET')
@@ -143,10 +143,10 @@ it('检查连接只读取私库和分支，不上传内容或改写同步状态�
   expect(calls).toEqual(['https://api.github.com/user', 'https://api.github.com/repos/example/synthetic', 'https://api.github.com/repos/example/synthetic/git/ref/heads/master'])
   expect(sync.status).toContain('@synthetic-user')
   expect(sync.status).toContain('未上传内容')
-  expect(readdirSync(path.join(l.root, 'local')).sort()).toEqual(before)
+  expect(readdirSync(path.join(l.root, '.xmemeory', 'local')).sort()).toEqual(before)
 })
 const syncRoot = 'https://api.github.com/repos/example/synthetic'
-const syncStateFile = (l: Library) => path.join(l.root, 'local', `sync-${hash('example/syntheticmaster').slice(0,16)}.json`)
+const syncStateFile = (l: Library) => path.join(l.root, '.xmemeory', 'local', `sync-${hash('example/syntheticmaster').slice(0,16)}.json`)
 it('远端无更新时跳过远端目录读取，仅上传本地变化', async () => {
   const l = library()
   l.save({ kind: 'inspiration', title: '本地新增', body: '本地内容' })
@@ -198,7 +198,7 @@ it('远端有更新时先写入本地再上传，远端变化不重复回传', a
 it('本地无变化时不创建远端提交', async () => {
   const l = library()
   l.save({ kind: 'inspiration', title: '无变化', body: '内容' })
-  const hashes = Object.fromEntries(walk(l.root).filter(syncAllowed).map(f => [f, hash(readFileSync(safePath(l.root, f)))]))
+  const hashes = Object.fromEntries([...walk(l.root), ...walk(l.root, '.xmemeory/metadata'), ...walk(l.root, '.xmemeory/tombstones'), ...walk(l.root, '.xmemeory/conflicts')].filter(syncAllowed).map(f => [f, hash(readFileSync(safePath(l.root, f)))]))
   atomic(syncStateFile(l), JSON.stringify({ hashes, lastRemoteSha: 'head-3', lastTreeSha: 'tree-3' }))
   const calls: string[] = []
   const sync = new GithubSync(l, () => {}, async (input, init) => {
@@ -304,20 +304,20 @@ it('缺少 lastRemoteSha 的旧状态文件走完整拉取路径', async () => {
 })
 it('SQLite 索引损坏时保留副本并从 Markdown 自动重建', () => {
   const root = mkdtempSync(path.join(temporary, 'corrupt-index-'))
-  mkdirSync(path.join(root, 'local'), { recursive: true })
-  writeFileSync(path.join(root, 'local/index.sqlite'), '这不是 SQLite 数据库')
+  mkdirSync(path.join(root, '.xmemeory', 'local'), { recursive: true })
+  writeFileSync(path.join(root, '.xmemeory/local/index.sqlite'), '这不是 SQLite 数据库')
   mkdirSync(path.join(root, 'memories'), { recursive: true })
   writeFileSync(path.join(root, 'memories/test.md'), '---\nxmemeory_id: recovered-note\ntype: memory\ntitle: 保留正文\n---\n数据库损坏后仍能恢复的 Markdown')
   const l = new Library(root); libraries.push(l)
   expect(l.get('recovered-note').body).toContain('仍能恢复的 Markdown')
   expect(l.search({ query: '数据库损坏' })).toHaveLength(1)
   expect(l.errors.join('')).toContain('已保留损坏副本')
-  expect(readdirSync(path.join(root, 'local')).some(file => file.startsWith('index.sqlite.corrupt-'))).toBe(true)
+  expect(readdirSync(path.join(root, '.xmemeory', 'local')).some(file => file.startsWith('index.sqlite.corrupt-'))).toBe(true)
   expect(l.db.prepare('PRAGMA quick_check').get()).toMatchObject({ quick_check: 'ok' })
 })
 it('SQLite 被另一连接锁住时仍保存正文，解锁后自动恢复索引', async () => {
   const l = library()
-  const blocker = new DatabaseSync(path.join(l.root, 'local/index.sqlite'))
+  const blocker = new DatabaseSync(path.join(l.root, '.xmemeory/local/index.sqlite'))
   try {
     blocker.exec('BEGIN IMMEDIATE')
     const note = l.save({ kind: 'inspiration', title: '锁冲突', body: '必须保留的正文' })
@@ -371,9 +371,9 @@ describe('本地 Markdown 资料库', () => {
     l.remove(n.id); l.refresh(); expect(l.search({})).toHaveLength(0)
     l.remove(n.id, true); l.refresh(); expect(l.search({})).toHaveLength(1)
   })
-  it('记忆按账号分层保存，作者与原文写入 Markdown', () => {
-    const l = library(), n = l.save({ id: 'x-12-34', kind: 'memory', title: '分层书签', body: '正文', author: 'alice', source: 'https://x.com/alice/status/34' })
-    expect(n.path).toBe('memories/12/34.md')
+  it('记忆按年份分层、以“日期 作者 - 标题”命名，作者与原文写入 Markdown', () => {
+    const l = library(), n = l.save({ id: 'x-12-34', kind: 'memory', title: '分层书签', body: '正文', author: 'alice', source: 'https://x.com/alice/status/34', publishedAt: '2026-09-14T08:30:00.000Z' })
+    expect(n.path).toBe('memories/2026/2026-09-14 alice - 分层书签.md')
     const raw = readFileSync(path.join(l.root, n.path), 'utf8')
     expect(raw).toContain('author: alice')
     expect(raw).toContain('https://x.com/alice/status/34')
@@ -394,8 +394,8 @@ it('同步判断区分单端修改和双方冲突，禁止凭据同步', () => {
   expect(syncAllowed('local/credentials.bin')).toBe(false)
   expect(syncAllowed('cookies.txt')).toBe(false)
   expect(syncAllowed('inspirations/测试.md')).toBe(true)
-  expect(syncAllowed('metadata/x-1-2.capture.json')).toBe(true)
-  expect(syncAllowed('metadata/../credentials.json')).toBe(false)
+  expect(syncAllowed('.xmemeory/metadata/x-1-2.capture.json')).toBe(true)
+  expect(syncAllowed('.xmemeory/metadata/../credentials.json')).toBe(false)
   const snapshot = new Map([['inspirations/a.md', Buffer.from('local winner')], ['conflicts/c.json', Buffer.from('resolved')]])
   const hashes = mergedHashes(snapshot)
   expect(mergeChoice(hashes['inspirations/a.md'], hashes['inspirations/a.md'], hashes['inspirations/a.md'])).toBe('same')

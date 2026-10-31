@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import type { Note, PartialRetryInfo } from '../shared/types'
 import { atomic, hash } from './library'
+import { privatePath } from './layout'
 import { articleDomMarkdown, normalizePostUrl, replaceCapturedImages, type ArticleDomBlock } from './x-parse'
 
 export const PARTIAL_RETRY_DAILY = 3
@@ -48,7 +49,7 @@ export function mergeCapturedSource(existing: string, incoming: string, expected
 function readCapture(root: string, id: string): CaptureMetadata | undefined {
   if (!/^[\w-]{1,100}$/.test(id)) return
   try {
-    const file = path.join(root, 'metadata', `${id}.capture.json`)
+    const file = privatePath(root, 'metadata', `${id}.capture.json`)
     if (!existsSync(file)) return
     const value = JSON.parse(readFileSync(file, 'utf8'))
     return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
@@ -106,7 +107,7 @@ export class PartialRetries {
   private prefix: string
 
   constructor(private root: string, now = new Date(), deviceData?: string) {
-    this.file = deviceData ? path.join(deviceData, 'partial-retries.json') : path.join(root, 'local', 'partial-retries.json')
+    this.file = deviceData ? path.join(deviceData, 'partial-retries.json') : privatePath(root, 'local', 'partial-retries.json')
     this.prefix = deviceData ? `${hash(path.resolve(root)).slice(0, 16)}:` : ''
     this.state = readState(this.file, dayKey(now))
   }

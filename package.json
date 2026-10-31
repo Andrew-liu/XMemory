@@ -1,6 +1,6 @@
 {
   "name": "xmemeory",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "本地优先的 X 灵感、记忆与创作工作区",
   "license": "MIT",
@@ -21,7 +21,9 @@
     "test:memory": "tsx tests/desktop-memory.ts",
     "test:themes": "tsx tests/desktop-themes.ts",
     "pack:win": "pnpm build && electron-builder --win --x64",
-    "pack:mac": "pnpm build && electron-builder --mac --x64 --arm64"
+    "pack:mac": "pnpm build && electron-builder --mac --arm64",
+    "test:migration": "tsx tests/desktop-migration.ts",
+    "test:perf": "XMEMEORY_PERF_ASSERT=1 tsx tests/desktop-perf.ts"
   },
   "build": {
     "appId": "app.xmemeory.desktop",
@@ -42,8 +44,16 @@
       "icon": "build/icon.ico"
     },
     "mac": {
-      "target": "dmg",
-      "category": "public.app-category.productivity"
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,

@@ -21,7 +21,7 @@ try {
   await page.evaluate(async () => {
     // Saved first but published between the other two: list order must follow publish time, not save time.
     await window.xm.save({ id: 'x-1-33', kind: 'memory', title: 'Carol 的书签', body: '可检索正文丙', author: 'carol', source: 'https://example.com/c/status/33', publishedAt: '2025-06-01T08:00:00.000Z', partial: false })
-    await window.xm.save({ id: 'x-1-11', kind: 'memory', title: 'Alice 的书签', body: '可检索正文甲\n\n![书签图片](../assets/demo.png)\n\n[原文](https://example.com/a/status/11)\n\n> 视频未下载，仅保留封面和原文链接。', author: 'alice', source: 'https://example.com/a/status/11', publishedAt: '2024-02-03T08:30:00.000Z', partial: false })
+    await window.xm.save({ id: 'x-1-11', kind: 'memory', title: 'Alice 的书签', body: '可检索正文甲\n\n![书签图片](../attachments/demo.png)\n\n[原文](https://example.com/a/status/11)\n\n> 视频未下载，仅保留封面和原文链接。', author: 'alice', source: 'https://example.com/a/status/11', publishedAt: '2024-02-03T08:30:00.000Z', partial: false })
     await window.xm.save({ id: 'x-1-22', kind: 'memory', title: 'Bob 的书签', body: '可检索正文乙，正文可能不完整，X 未返回完整内容。\n\n[原文](https://example.com/b/status/22)', author: 'bob', source: 'https://example.com/b/status/22', partial: true })
   })
   const nav = (name: string) => page.locator('.sidebar').getByRole('button', { name, exact: true }).or(page.locator('.sidebar nav').getByRole('button', { name })).first()

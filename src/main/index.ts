@@ -1,10 +1,14 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, session, Menu, Tray, nativeImage, clipboard, ClipboardItem, nativeTheme, powerMonitor } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, session, Menu, Tray, nativeImage, clipboard, ClipboardItem, nativeTheme, powerMonitor, powerSaveBlocker, protocol } from 'electron'
 import { readFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFile, stat } from 'node:fs/promises'
+import { ASSET_SCHEME, parseAssetURL } from '../shared/assets'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { Library, atomic, safePath } from './library'
+import { migrateLibrary } from './migrate'
+import { resolveImage } from './layout'
 import { GithubSync, githubTokenKind, normalizeGithubToken, normalizeRepository, runConfiguredStartupSync } from './sync'
 import { githubNetworkFetch } from './github-network'
 import { pruneSecrets } from './providers'
@@ -15,6 +19,7 @@ import { XCapture } from './x-capture'
 import { AutoCollector } from './auto-collect'
 import { addRecovery, clearRecoveries, pendingRecoveries } from './recovery'
 import { trayIcon16, trayIcon32 } from './tray-icon'
+import { trayTemplate18, trayTemplate36 } from './tray-template'
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 let win: BrowserWindow
@@ -65,7 +70,15 @@ const loginItems: { available: boolean; get(): boolean; set(enabled: boolean): v
       get: () => app.getLoginItemSettings(process.platform === 'win32' ? { args: ['--hidden'] } : undefined).openAtLogin,
       set: (enabled: boolean) => app.setLoginItemSettings(process.platform === 'win32' ? { openAtLogin: enabled, args: ['--hidden'] } : { openAtLogin: enabled })
     }
-const changed = () => { if (win && !win.isDestroyed()) win.webContents.send('xm:changed') }
+const changed = () => { keepAwake(!!capture?.busy); if (win && !win.isDestroyed()) win.webContents.send('xm:changed') }
+// While collecting, keep macOS from napping this app and its helper Chrome (App Nap throttles timers and page scrolling).
+// Shown for a minute after an on-disk layout upgrade, then left to the backup folder and the changelog.
+let upgradeNotice = { text: '', until: 0 }
+let napBlocker: number | undefined
+function keepAwake(active: boolean) {
+  if (active && napBlocker === undefined) napBlocker = powerSaveBlocker.start('prevent-app-suspension')
+  else if (!active && napBlocker !== undefined) { powerSaveBlocker.stop(napBlocker); napBlocker = undefined }
+}
 const persist = () => atomic(settingsFile, JSON.stringify(settings))
 function saveSecrets(nextSecrets = secrets) {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('系统凭据加密不可用，未保存密钥')
@@ -78,7 +91,10 @@ function saveSecrets(nextSecrets = secrets) {
 }
 async function openLibrary(root: string) {
   if (sync?.running) throw new Error('请等待同步结束后切换资料库')
+  // Older libraries are upgraded in place to the Obsidian-compatible layout before anything reads them.
+  const migrated = migrateLibrary(root)
   const nextLibrary = new Library(root, changed)
+  if (migrated) upgradeNotice = { text: `资料库已升级为 Obsidian 兼容结构（${migrated.notes} 篇笔记），可直接用 Obsidian 打开此文件夹。升级前的完整备份：${migrated.backup}`, until: Date.now() + 60_000 }
   auto?.dispose(); capture?.pause(); await capture?.disconnect().catch(() => {}); await library?.close()
   library = nextLibrary; library.start()
   capture = new XCapture(library, app.getPath('userData'), changed)
@@ -126,6 +142,24 @@ async function copyImageToClipboard(bytes: Buffer, richText = false) {
     ...(richText ? { 'text/html': `<img src="${dataURL}" alt="图片">` } : {})
   })])
 }
+const imageMime = (file: string) => file.endsWith('.png') ? 'image/png' : /\.jpe?g$/i.test(file) ? 'image/jpeg' : file.endsWith('.gif') ? 'image/gif' : 'image/webp'
+/** Absolute path of a library image referenced from a note; rejects paths outside the library and non-image files. */
+function libraryImage(rel: string, from?: string) {
+  const file = safePath(library.root, resolveImage(rel, from || 'inspirations/note.md'))
+  if (!/\.(png|jpe?g|gif|webp)$/i.test(file)) throw new Error('不支持的图片格式')
+  return file
+}
+/** Serves `xm-asset://` image requests with async file reads so large images never block the main process. */
+async function serveAsset(request: Request) {
+  const ref = parseAssetURL(request.url)
+  if (!ref) return new Response('无效的图片地址', { status: 400 })
+  try {
+    const file = libraryImage(ref.relative, ref.from)
+    const info = await stat(file)
+    if (!info.isFile() || info.size > 20 * 1024 * 1024) return new Response('图片不可用', { status: 404 })
+    return new Response(new Uint8Array(await readFile(file)), { headers: { 'Content-Type': imageMime(file), 'Cache-Control': 'no-cache' } })
+  } catch { return new Response('图片缺失或不可访问', { status: 404 }) }
+}
 async function dispatch(method: string, args: unknown[]) {
   if (method === 'recoverUnsaved') {
     const note = z.object({ id: z.string().max(100), title: z.string().max(400), body: z.string().max(4_000_000) }).parse(args[0])
@@ -135,7 +169,7 @@ async function dispatch(method: string, args: unknown[]) {
     addRecovery(path.join(app.getPath('userData'), 'recovery-notice.json'), recoveryDir, file)
     return file
   }
-  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, version: app.getVersion(), settings: { ...settings, hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github), openAtLogin: loginItems.get(), openAtLoginAvailable: loginItems.available }, status: library.errors.join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn, xLogin: capture.loginRecord, bookmarks: capture.bookmarksSummary(), auto: auto?.state || { enabled: false, active: false }, partialRetries: capture.retryInfo() } satisfies Snapshot
+  if (method === 'snapshot') return { notes: [...library.notes.values()], conflicts: [...library.conflicts.values()], library: library.root, version: app.getVersion(), settings: { ...settings, hasGithubKey: !!secrets.github, githubTokenType: githubTokenKind(secrets.github), openAtLogin: loginItems.get(), openAtLoginAvailable: loginItems.available }, status: [Date.now() < upgradeNotice.until ? upgradeNotice.text : '', ...library.errors].filter(Boolean).join('；'), xStatus: capture.status, syncStatus: sync.status, archive: capture.progress, xLoggedIn: capture.loggedIn, xLogin: capture.loginRecord, bookmarks: capture.bookmarksSummary(), auto: auto?.state || { enabled: false, active: false }, partialRetries: capture.retryInfo() } satisfies Snapshot
   if (method === 'save') {
     const note = z.object({ id: z.string().optional(), kind: z.enum(['inspiration','memory','draft','topic']), title: z.string().max(400), body: z.string().max(4_000_000), tags: z.array(z.string()).max(50).optional(), groupId: z.string().optional(), parentId: z.string().optional(), scheduledDate: z.string().refine(validDate).optional(), completed: z.boolean().optional(), author: z.string().max(80).optional(), source: z.string().max(500).optional(), publishedAt: z.iso.datetime().optional(), sortOrder: z.number().int().min(0).optional(), partial: z.boolean().optional(), capturedImages: z.array(z.string().max(500)).max(40).optional() }).parse(args[0])
     return library.save(note, z.string().optional().parse(args[1]), z.object({ quiet: z.boolean().optional() }).optional().parse(args[2]))
@@ -146,9 +180,7 @@ async function dispatch(method: string, args: unknown[]) {
   if (method === 'image') return library.addImage(Buffer.from(z.array(z.number().int().min(0).max(255)).max(20*1024*1024).parse(args[0])), z.string().parse(args[1]))
   if (method === 'asset' || method === 'copyImage' || method === 'showImageMenu') {
     const rel = z.string().parse(args[0]); const from = z.string().optional().parse(args[1])
-    const relative = rel.startsWith('assets/') ? rel : path.join(path.dirname(from || 'inspirations/note.md'), rel)
-    const file = safePath(library.root, relative)
-    if (!/\.(png|jpe?g|gif|webp)$/i.test(file)) throw new Error('不支持的图片格式')
+    const file = libraryImage(rel, from)
     const bytes = readFileSync(file)
     if (bytes.length > 20*1024*1024) throw new Error('图片过大')
     if (method === 'copyImage') {
@@ -163,8 +195,7 @@ async function dispatch(method: string, args: unknown[]) {
       ]).popup({ window: win })
       return
     }
-    const mime = file.endsWith('.png') ? 'png' : /\.jpe?g$/i.test(file) ? 'jpeg' : file.endsWith('.gif') ? 'gif' : 'webp'
-    return `data:image/${mime};base64,${bytes.toString('base64')}`
+    return `data:${imageMime(file)};base64,${bytes.toString('base64')}`
   }
   if (method === 'selectLibrary') {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
@@ -205,12 +236,14 @@ async function dispatch(method: string, args: unknown[]) {
 }
 // Acquire before opening files or SQLite, including when launched from another build directory.
 if (process.env.XMEMEORY_TEST_DATA) app.setPath('userData', process.env.XMEMEORY_TEST_DATA)
+protocol.registerSchemesAsPrivileged([{ scheme: ASSET_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 const primaryInstance = app.requestSingleInstanceLock()
 if (!primaryInstance) app.quit()
 app.on('second-instance', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus() } })
 app.whenReady().then(async () => {
   if (!primaryInstance) return
   mkdirSync(app.getPath('userData'), { recursive: true })
+  protocol.handle(ASSET_SCHEME, serveAsset)
   settingsFile = path.join(app.getPath('userData'), 'settings.json'); secretsFile = path.join(app.getPath('userData'), 'credentials.bin')
   const stored: Record<string, unknown> = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile,'utf8')) : {}
   for (const legacy of ['scanMinutes', 'collect', 'cookieDirectory', 'providers', 'activeProvider']) delete stored[legacy]
@@ -228,7 +261,12 @@ app.whenReady().then(async () => {
     } catch { /* Retry on the next launch. */ }
   }
   const rootFile = path.join(app.getPath('userData'), 'library-path.json')
-  await openLibrary(existsSync(rootFile) ? JSON.parse(readFileSync(rootFile, 'utf8')) : path.join(app.getPath('userData'), 'library'))
+  try { await openLibrary(existsSync(rootFile) ? JSON.parse(readFileSync(rootFile, 'utf8')) : path.join(app.getPath('userData'), 'library')) }
+  catch (error) {
+    // Never run on a half-understood library: report and quit, leaving the files (and any backup) untouched.
+    dialog.showErrorBox('无法打开资料库', error instanceof Error ? error.message : '未知错误')
+    app.exit(1); return
+  }
   await capture.restore()
   persist()
   powerMonitor.on('resume', () => auto?.resume())
@@ -259,8 +297,11 @@ app.whenReady().then(async () => {
   if (startHidden) win.once('show', showRecoveryNotice)
   else showRecoveryNotice()
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'XMemeory', submenu: [{ label: '显示窗口', click: () => win.show() }, { role: 'quit', label: '退出' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }]))
-  const icon = nativeImage.createFromDataURL(trayIcon16)
-  icon.addRepresentation({ scaleFactor: 2, dataURL: trayIcon32 })
+  // macOS menu bar icons are monochrome "template" images that the system recolours for light/dark menu bars.
+  const mac = process.platform === 'darwin'
+  const icon = nativeImage.createFromDataURL(mac ? trayTemplate18 : trayIcon16)
+  icon.addRepresentation({ scaleFactor: 2, dataURL: mac ? trayTemplate36 : trayIcon32 })
+  if (mac) icon.setTemplateImage(true)
   tray = new Tray(icon); tray.setToolTip('XMemeory'); tray.setContextMenu(Menu.buildFromTemplate([{ label: '打开 XMemeory', click: () => win.show() }, { label: '退出', click: () => app.quit() }])); tray.on('click', () => win.show())
   win.on('close', e => {
     if (quitting) return
@@ -291,4 +332,6 @@ app.on('before-quit', e => {
     quitting = true; app.quit()
   })().catch(e => dialog.showErrorBox('尚未退出', e.message)).finally(() => { closing = false })
 })
+// Clicking the Dock icon brings the window back after it was closed to the menu bar.
+app.on('activate', () => { if (win && !win.isDestroyed()) { win.show(); win.focus() } })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !settings?.closeToTray) app.quit() })

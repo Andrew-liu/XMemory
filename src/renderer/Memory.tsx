@@ -39,14 +39,25 @@ export function compareMemoryTime(a: Note, b: Note) {
   return (Number.isNaN(diff) ? 0 : diff) || b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)
 }
 
-export function memoryMatches(note: Note, query: string) {
-  const parsed = parseMemoryQuery(query)
+const haystacks = new WeakMap<Note, string>()
+/** Normalised searchable text, cached per note object. Saving a note replaces only that object, so the rest stay cached. */
+function memoryHaystack(note: Note) {
+  let text = haystacks.get(note)
+  if (text === undefined) { text = `${note.title}\n${note.body}\n${note.source || ''}`.normalize('NFKC').toLocaleLowerCase(); haystacks.set(note, text) }
+  return text
+}
+export function memoryMatchesParsed(note: Note, parsed: ParsedMemoryQuery) {
   if (parsed.partial && !isPartialMemory(note)) return false
-  const author = (note.author || '').normalize('NFKC').toLocaleLowerCase()
-  if (parsed.authors.some(name => !author.includes(name))) return false
+  if (parsed.authors.length) {
+    const author = (note.author || '').normalize('NFKC').toLocaleLowerCase()
+    if (parsed.authors.some(name => !author.includes(name))) return false
+  }
   if (!parsed.terms.length) return true
-  const haystack = `${note.title}\n${note.body}\n${note.source || ''}`.normalize('NFKC').toLocaleLowerCase()
+  const haystack = memoryHaystack(note)
   return parsed.terms.every(term => haystack.includes(term))
+}
+export function memoryMatches(note: Note, query: string) {
+  return memoryMatchesParsed(note, parseMemoryQuery(query))
 }
 
 export function retryStatus(info?: PartialRetryInfo) {

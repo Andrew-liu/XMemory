@@ -8,6 +8,7 @@ import type { Conflict, Kind, Note, SearchHit, SearchQuery } from '../shared/typ
 import { validDate } from '../shared/calendar'
 import { normalizeLines, stableValue } from '../shared/conflicts'
 import { referencedImages } from './export-images'
+import { ATTACHMENTS, PRIVATE, SCHEMA_VERSION, TRASH, collisionSuffixes, isTrashed, logicalPath, memoryPath, privatePath, resolveImage, trashPath } from './layout'
 
 export const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 export function atomic(file: string, value: string | Buffer) {
@@ -74,7 +75,7 @@ export function mergeCompletionTimeOnly(a: string, b: string) {
   return leftMillis <= rightMillis ? a : b
 }
 function openIndex(root: string) {
-  const file = path.join(root, 'local/index.sqlite')
+  const file = privatePath(root, 'local', 'index.sqlite')
   let db: DatabaseSync | undefined
   try {
     db = new DatabaseSync(file)
@@ -91,7 +92,13 @@ function openIndex(root: string) {
     return { db: new DatabaseSync(file), recovered: true }
   }
 }
-const folders: Record<Kind, string> = { inspiration: 'inspirations', memory: 'memories', draft: 'drafts', topic: 'topics' }
+/** Minimal Obsidian settings so the library opens as a vault and new images go to attachments/. Never overwrites an existing config. */
+export function ensureObsidianConfig(root: string) {
+  const dir = path.join(root, '.obsidian')
+  if (existsSync(dir)) return
+  atomic(path.join(dir, 'app.json'), JSON.stringify({ attachmentFolderPath: ATTACHMENTS, newLinkFormat: 'relative', useMarkdownLinks: true }, null, 2))
+}
+export const folders: Record<Kind, string> = { inspiration: 'inspirations', memory: 'memories', draft: 'drafts', topic: 'topics' }
 export class Library {
   notes = new Map<string, Note>()
   conflicts = new Map<string, Conflict>()
@@ -106,11 +113,18 @@ export class Library {
   private selfWrites = new Map<string, string>()
   private pendingFiles = new Set<string>()
   private fullPending = false
+  /** Note-folder paths the library just moved into or out of the trash; their watcher echo is skipped once. */
+  private selfMoves = new Set<string>()
   constructor(public root: string, private changed: () => void = () => {}) {
-    for (const folder of [...Object.values(folders), 'assets', 'metadata', 'tombstones', 'conflicts', 'local']) mkdirSync(path.join(root, folder), { recursive: true })
-    if (!existsSync(path.join(root, 'manifest.json'))) atomic(path.join(root, 'manifest.json'), JSON.stringify({ schemaVersion: 1, application: 'XMemeory' }))
-    const manifest = JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8'))
-    if (manifest.schemaVersion !== 1) throw new Error('资料库版本不兼容，已停止写入')
+    const manifestFile = path.join(root, 'manifest.json')
+    if (existsSync(manifestFile)) {
+      const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+      if (manifest.schemaVersion === 1) throw new Error('资料库尚未升级到 Obsidian 兼容结构，请重新启动应用完成升级')
+      if (manifest.schemaVersion !== SCHEMA_VERSION) throw new Error('资料库版本不兼容，已停止写入')
+    }
+    for (const folder of [...Object.values(folders), ATTACHMENTS]) mkdirSync(path.join(root, folder), { recursive: true })
+    for (const folder of ['metadata', 'tombstones', 'conflicts', 'local', 'trash']) mkdirSync(privatePath(root, folder), { recursive: true })
+    if (!existsSync(manifestFile)) { atomic(manifestFile, JSON.stringify({ schemaVersion: SCHEMA_VERSION, application: 'XMemeory' })); ensureObsidianConfig(root) }
     const index = openIndex(root)
     this.db = index.db
     this.indexRecovered = index.recovered
@@ -119,21 +133,24 @@ export class Library {
     this.refresh()
   }
   private recover() {
-    const file = path.join(this.root, 'local/pending.json')
+    const file = privatePath(this.root, 'local', 'pending.json')
     if (!existsSync(file)) return
     const pending = JSON.parse(readFileSync(file, 'utf8'))
     if (pending && typeof pending.path === 'string' && typeof pending.raw === 'string') {
       const target = safePath(this.root, pending.path)
       const current = existsSync(target) ? readFileSync(target, 'utf8') : ''
       if (hash(current) === pending.before || hash(current) === hash(pending.raw)) atomic(target, pending.raw)
-      else atomic(path.join(this.root, 'local', `recovery-${randomUUID()}.md`), pending.raw)
+      else atomic(privatePath(this.root, 'local', `recovery-${randomUUID()}.md`), pending.raw)
     }
     atomic(file, 'null')
   }
   start() {
     this.watcher = chokidar.watch(Object.values(folders).map(f => path.join(this.root, f)), { ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 350, pollInterval: 100 }, ignored: p => p.endsWith('.tmp') })
     this.watcher.on('all', (event, file) => {
+      // A new folder holds no notes yet; the files written into it raise their own events.
+      if (event === 'addDir') return
       const key = path.resolve(file)
+      if ((event === 'unlink' || event === 'add') && this.selfMoves.delete(key)) return
       const own = this.selfWrites.get(key)
       if (own !== undefined) {
         this.selfWrites.delete(key)
@@ -164,15 +181,17 @@ export class Library {
     const id = typeof meta.xmemeory_id === 'string' ? meta.xmemeory_id : `external-${hash(file).slice(0, 24)}`
     if (!/^[\w-]{1,100}$/.test(id)) throw new Error('条目 ID 无效')
     const stat = lstatSync(target)
-    const auxFile = path.join(this.root, 'metadata', `${id}.json`)
+    const auxFile = privatePath(this.root, 'metadata', `${id}.json`)
     const aux = existsSync(auxFile) ? JSON.parse(readFileSync(auxFile, 'utf8')) : {}
-    const tombstone = path.join(this.root, 'tombstones', `${id}.json`)
+    const tombstone = privatePath(this.root, 'tombstones', `${id}.json`)
     const deleted = existsSync(tombstone) && JSON.parse(readFileSync(tombstone, 'utf8')).deleted !== false
     const old = previous.get(id)
-    const note: Note = { ...aux, id, kind, title: String(meta.title || body.match(/^# (.+)$/m)?.[1] || path.basename(file, '.md')), tags: Array.isArray(meta.tags) ? meta.tags.map(String) : [], body, hash: hash(raw), path: file, createdAt: String(meta.createdAt || stat.birthtime.toISOString()), updatedAt: stat.mtime.toISOString(), deleted }
+    const note: Note = { ...aux, id, kind, title: String(meta.title || body.match(/^# (.+)$/m)?.[1] || path.basename(file, '.md')), tags: Array.isArray(meta.tags) ? meta.tags.map(String) : [], body, hash: hash(raw), path: file, createdAt: String(meta.created || meta.createdAt || stat.birthtime.toISOString()), updatedAt: stat.mtime.toISOString(), deleted }
     if (typeof meta.author === 'string') note.author = meta.author
     if (typeof meta.source === 'string') note.source = meta.source
-    if (typeof meta.publishedAt === 'string' && !Number.isNaN(Date.parse(meta.publishedAt))) note.publishedAt = new Date(meta.publishedAt).toISOString()
+    // v2 writes Obsidian-style `published`/`created`; files from older versions or other tools may still use the camelCase names.
+    const published = meta.published ?? meta.publishedAt
+    if (typeof published === 'string' && !Number.isNaN(Date.parse(published))) note.publishedAt = new Date(published).toISOString()
     if (Number.isInteger(meta.sortOrder) && meta.sortOrder >= 0) note.sortOrder = meta.sortOrder
     if (meta.partial === true) note.partial = true
     note.scheduledDate = validDate(meta.scheduledDate) ? meta.scheduledDate : undefined
@@ -186,7 +205,7 @@ export class Library {
   /** Reload one Markdown file in place. Returns false when a full refresh is required instead. */
   private reloadOne(file: string): boolean {
     if (this.closed) return true
-    const kind = (Object.entries(folders) as [Kind, string][]).find(([, folder]) => file.startsWith(`${folder}/`))?.[0]
+    const kind = (Object.entries(folders) as [Kind, string][]).find(([, folder]) => logicalPath(file).startsWith(`${folder}/`))?.[0]
     if (!kind || !existsSync(path.join(this.root, file))) return false
     const atPath = [...this.notes.values()].find(n => n.path === file)
     const errors = this.errors.length
@@ -221,7 +240,7 @@ export class Library {
     const previous = this.notes
     const next = new Map<string, Note>()
     for (const [kind, folder] of Object.entries(folders)) {
-      for (const file of walk(this.root, folder).filter(f => f.endsWith('.md'))) {
+      for (const file of [...walk(this.root, folder), ...walk(this.root, `${TRASH}/${folder}`)].filter(f => f.endsWith('.md'))) {
         try {
           const note = this.loadFile(kind as Kind, file, previous)
           if (!note) continue
@@ -232,14 +251,15 @@ export class Library {
     }
     // Missing externally deleted files stay recoverable. Do not infer deletion during a rename.
     for (const old of previous.values()) if (!next.has(old.id)) {
-      const file = path.join(this.root, 'local', `missing-${old.id}.json`)
+      const file = privatePath(this.root, 'local', `missing-${old.id}.json`)
       if (!existsSync(file)) atomic(file, JSON.stringify(old))
-      this.errors.push(`文件缺失：${old.title}，可在 local/missing 记录中恢复`)
+      this.errors.push(`文件缺失：${old.title}，可在 ${PRIVATE}/local/missing 记录中恢复`)
     }
+    for (const note of next.values()) this.placeByTombstone(note)
     this.notes = next
     this.conflicts.clear()
     const pendingByNote = new Map<string, Conflict[]>()
-    for (const file of walk(this.root, 'conflicts').filter(f => f.endsWith('.json'))) {
+    for (const file of walk(this.root, `${PRIVATE}/conflicts`).filter(f => f.endsWith('.json'))) {
       try {
         const c: Conflict = JSON.parse(readFileSync(safePath(this.root, file), 'utf8'))
         if (c.id && c.current && c.incoming) {
@@ -267,7 +287,7 @@ export class Library {
         this.archiveConflict(latest, 'superseded')
         const currentRaw = readFileSync(safePath(this.root, current.path), 'utf8')
         const rebased = this.makeConflict(current, latest.incoming, latest.incomingRaw ? { currentRaw, incomingRaw: latest.incomingRaw } : undefined)
-        atomic(path.join(this.root, 'conflicts', `${rebased.id}.json`), JSON.stringify(rebased))
+        atomic(privatePath(this.root, 'conflicts', `${rebased.id}.json`), JSON.stringify(rebased))
         this.conflicts.set(rebased.id, rebased)
       }
     }
@@ -299,14 +319,34 @@ export class Library {
     }
   }
   get(id: string) { const note = this.notes.get(id); if (!note) throw new Error('找不到条目，请刷新'); return note }
+  /** Keep a note's file where its tombstone says: deleted notes in the trash folder, restored notes back in place. */
+  private placeByTombstone(note: Note) {
+    const target = note.deleted ? trashPath(note.path) : logicalPath(note.path)
+    if (target === note.path) return
+    try {
+      const from = safePath(this.root, note.path), to = safePath(this.root, target)
+      if (existsSync(to)) { this.errors.push(`${logicalPath(note.path)} 无法${note.deleted ? '移入' : '移出'}回收站：目标位置已有文件`); return }
+      mkdirSync(path.dirname(to), { recursive: true })
+          if (this.watcher) this.selfMoves.add(path.resolve(isTrashed(note.path) ? to : from))
+      renameSync(from, to)
+      note.path = target
+    } catch { this.errors.push(`${logicalPath(note.path)} 移动失败，请检查资料库访问权限`) }
+  }
+  /** Readable unused path for a new memory; a clash with another note adds the tweet ID, then the full ID. */
+  private newMemoryPath(input: { publishedAt?: string; createdAt?: string; author?: string; title?: string }, id: string) {
+    const used = new Set([...this.notes.values()].map(n => logicalPath(n.path).toLocaleLowerCase()))
+    const free = (file: string) => !used.has(file.toLocaleLowerCase()) && !existsSync(path.join(this.root, file)) && !existsSync(path.join(this.root, trashPath(file)))
+    for (const suffix of ['', ...collisionSuffixes(id)]) { const file = memoryPath(input, suffix); if (free(file)) return file }
+    return memoryPath(input, randomUUID().slice(0, 8))
+  }
   save(input: Partial<Note> & { kind: Kind; title: string; body: string }, expected?: string, options?: { quiet?: boolean }): Note {
     if (input.scheduledDate !== undefined && !validDate(input.scheduledDate)) throw new Error('无效日历日期')
     if (!(input.kind in folders) || input.body.length > 4_000_000 || input.title.length > 400) throw new Error('正文或标题超出限制')
     const id = input.id || randomUUID()
     if (!/^[\w-]{1,100}$/.test(id)) throw new Error('无效 ID')
     const old = this.notes.get(id)
-    const nested = input.kind === 'memory' && id.match(/^x-(\d+)-(\d+)$/)
-    const relative = old?.path || (nested ? `memories/${nested[1]}/${nested[2]}.md` : `${folders[input.kind]}/${id}.md`)
+    const now = new Date().toISOString()
+    const relative = old?.path || (input.kind === 'memory' ? this.newMemoryPath({ publishedAt: input.publishedAt, createdAt: now, author: input.author, title: input.title }, id) : `${folders[input.kind]}/${id}.md`)
     const target = safePath(this.root, relative)
     const before = existsSync(target) ? readFileSync(target, 'utf8') : ''
     if (old && expected !== hash(before)) {
@@ -315,19 +355,21 @@ export class Library {
       this.addConflict(current, { ...old, ...input, id, path: relative, hash: hash(input.body), updatedAt: new Date().toISOString() } as Note)
       throw new Error('检测到外部修改，已保留双方。请在“冲突”中处理。')
     }
-    const meta = before ? decode(before).metadata : {}
-    const now = new Date().toISOString()
+    const { createdAt: legacyCreated, publishedAt: legacyPublished, ...meta } = before ? decode(before).metadata : {} as Record<string, unknown>
     const completed = input.completed ?? old?.completed ?? false
     const author = input.author ?? old?.author ?? meta.author
     const source = input.source ?? old?.source ?? meta.source
-    const publishedAt = input.publishedAt ?? old?.publishedAt ?? meta.publishedAt
+    const publishedAt = input.publishedAt ?? old?.publishedAt ?? meta.published ?? legacyPublished
     const sortOrder = input.sortOrder ?? old?.sortOrder ?? meta.sortOrder
     const partial = input.partial ?? old?.partial ?? meta.partial
-    const raw = `---\n${stringify({ ...meta, xmemeory_id: id, type: input.kind, title: input.title, tags: input.tags || old?.tags || [], createdAt: old?.createdAt || now, scheduledDate: input.scheduledDate ?? old?.scheduledDate, sortOrder, completed, completedAt: completed ? old?.completedAt || now : undefined, author, source, publishedAt, partial: partial || undefined })}---\n${input.body}`
+    const created = old?.createdAt || (typeof meta.created === 'string' ? meta.created : typeof legacyCreated === 'string' ? legacyCreated : now)
+    // Obsidian finds notes by alias, which makes UUID-named inspirations and topics reachable by title.
+    const aliases = [...new Set([input.title, ...(Array.isArray(meta.aliases) ? meta.aliases.map(String).filter((alias: string) => alias !== old?.title) : [])])].filter(Boolean)
+    const raw = `---\n${stringify({ ...meta, xmemeory_id: id, type: input.kind, title: input.title, aliases: aliases.length ? aliases : undefined, tags: input.tags || old?.tags || [], created, scheduledDate: input.scheduledDate ?? old?.scheduledDate, sortOrder, completed, completedAt: completed ? old?.completedAt || now : undefined, author, source, published: publishedAt, partial: partial || undefined })}---\n${input.body}`
     const eol = before.includes('\r\n') ? '\r\n' : '\n'
     const persisted = (before.startsWith('\uFEFF') ? '\uFEFF' : '') + raw.replace(/\r?\n/g, eol)
-    atomic(path.join(this.root, 'local/pending.json'), JSON.stringify({ path: relative, before: hash(before), raw: persisted }))
-    if (before) atomic(path.join(this.root, 'local', `previous-${id}.md`), before)
+    atomic(privatePath(this.root, 'local', 'pending.json'), JSON.stringify({ path: relative, before: hash(before), raw: persisted }))
+    if (before) atomic(privatePath(this.root, 'local', `previous-${id}.md`), before)
     if (this.watcher) {
       if (this.selfWrites.size > 500) this.selfWrites.clear()
       this.selfWrites.set(path.resolve(target), hash(persisted))
@@ -335,8 +377,8 @@ export class Library {
     atomic(target, persisted)
     const defined = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
     const { body: _body, hash: _hash, path: _path, ...aux } = { ...old, ...defined, id, author, source, partial }
-    atomic(path.join(this.root, 'metadata', `${id}.json`), JSON.stringify({ ...aux, savedHash: hash(persisted) }))
-    atomic(path.join(this.root, 'local/pending.json'), 'null')
+    atomic(privatePath(this.root, 'metadata', `${id}.json`), JSON.stringify({ ...aux, savedHash: hash(persisted) }))
+    atomic(privatePath(this.root, 'local', 'pending.json'), 'null')
     // Only this file changed: re-read it alone instead of rescanning every note and rebuilding the index.
     if (!this.reloadOne(relative)) this.refresh()
     if (!options?.quiet) this.changed()
@@ -348,14 +390,14 @@ export class Library {
       ...(originals ? { currentMetadata: decode(originals.currentRaw).metadata, incomingMetadata: decode(originals.incomingRaw).metadata } : {}) }
   }
   private archiveConflict(c: Conflict, reason: string) {
-    atomic(path.join(this.root, 'local', `conflict-${c.id}-${randomUUID()}.json`), JSON.stringify(c))
-    atomic(path.join(this.root, 'conflicts', `${c.id}.json`), JSON.stringify({ id: c.id, noteId: c.noteId, resolved: true, reason, createdAt: new Date().toISOString() }))
+    atomic(privatePath(this.root, 'local', `conflict-${c.id}-${randomUUID()}.json`), JSON.stringify(c))
+    atomic(privatePath(this.root, 'conflicts', `${c.id}.json`), JSON.stringify({ id: c.id, noteId: c.noteId, resolved: true, reason, createdAt: new Date().toISOString() }))
     this.conflicts.delete(c.id)
   }
   addConflict(current: Note, incoming: Note, originals?: { currentRaw: string; incomingRaw: string }) {
     for (const old of [...this.conflicts.values()]) if (old.noteId === current.id) this.archiveConflict(old, 'superseded')
     const conflict = this.makeConflict(current, incoming, originals)
-    atomic(path.join(this.root, 'conflicts', `${conflict.id}.json`), JSON.stringify(conflict))
+    atomic(privatePath(this.root, 'conflicts', `${conflict.id}.json`), JSON.stringify(conflict))
     this.conflicts.set(conflict.id, conflict); this.changed()
   }
   resolve(id: string, action: 'current' | 'incoming' | 'both' | 'merge', body?: string) {
@@ -368,13 +410,13 @@ export class Library {
     if (c.incomingRaw && (action === 'incoming' || action === 'both')) {
       const parsed = decode(c.incomingRaw)
       const id = action === 'both' ? randomUUID() : current.id
-      const target = action === 'both' ? `${folders[current.kind]}/${id}.md` : current.path
       const title = String(parsed.metadata.title || c.incoming.title) + (action === 'both' ? ' · 保留副本' : '')
-      atomic(path.join(this.root, 'local', `previous-${current.id}.md`), readFileSync(safePath(this.root, current.path)))
+      const target = action !== 'both' ? current.path : current.kind === 'memory' ? this.newMemoryPath({ ...c.incoming, title }, id) : `${folders[current.kind]}/${id}.md`
+      atomic(privatePath(this.root, 'local', `previous-${current.id}.md`), readFileSync(safePath(this.root, current.path)))
       const raw = `---\n${stringify({ ...parsed.metadata, xmemeory_id: id, type: current.kind, title })}---\n${parsed.body}`
       atomic(safePath(this.root, target), raw)
       const auxiliary = Object.fromEntries(Object.entries(c.incoming).filter(([key]) => !['body', 'hash', 'path', 'author', 'source', 'publishedAt', 'sortOrder', 'partial'].includes(key)))
-      atomic(path.join(this.root, 'metadata', `${id}.json`), JSON.stringify({ ...auxiliary, id, kind: current.kind, title, savedHash: hash(raw) }))
+      atomic(privatePath(this.root, 'metadata', `${id}.json`), JSON.stringify({ ...auxiliary, id, kind: current.kind, title, savedHash: hash(raw) }))
     }
     else if (action === 'both') this.save({ ...c.incoming, id: undefined, title: `${c.incoming.title} · 保留副本` })
     else if (action === 'incoming' || action === 'merge') this.save({ ...current,
@@ -385,9 +427,10 @@ export class Library {
   }
   remove(id: string, restore = false) {
     const n = this.get(id)
-    const file = path.join(this.root, 'tombstones', `${id}.json`)
-    atomic(file, JSON.stringify({ id, deleted: !restore, time: new Date().toISOString() }))
+    atomic(privatePath(this.root, 'tombstones', `${id}.json`), JSON.stringify({ id, deleted: !restore, time: new Date().toISOString() }))
     n.deleted = !restore
+    // Deleted files leave the note folders so Obsidian no longer shows them; the tombstone remains the sync signal.
+    this.placeByTombstone(n)
     this.changed()
   }
   search(q: SearchQuery): SearchHit[] {
@@ -407,7 +450,7 @@ export class Library {
     if (bytes.length > 20 * 1024 * 1024) throw new Error('图片超过 20 MiB，请缩小后导入')
     const ext = bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? 'png' : bytes[0] === 255 && bytes[1] === 216 ? 'jpg' : bytes.subarray(0, 6).toString().startsWith('GIF8') ? 'gif' : bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP' ? 'webp' : ''
     if (!ext) throw new Error(`${name}: 仅支持 PNG、JPEG、GIF、WebP 图片`)
-    const relative = `assets/${hash(bytes)}.${ext}`
+    const relative = `${ATTACHMENTS}/${hash(bytes)}.${ext}`
     if (!existsSync(path.join(this.root, relative))) atomic(path.join(this.root, relative), bytes)
     return relative
   }
@@ -415,19 +458,20 @@ export class Library {
     const note = this.get(id)
     const target = path.join(destination, `XMemeory-${id}-${Date.now()}`)
     const original = safePath(this.root, note.path)
-    const files = new Set([note.path])
+    // Source path -> path inside the export; a trashed note is exported under the path it had before deletion.
+    const files = new Map([[note.path, logicalPath(note.path)]])
     for (const reference of referencedImages(decode(readFileSync(original, 'utf8')).body)) {
-      let relative: string
-      try { relative = decodeURIComponent(reference) } catch { throw new Error('图片路径编码无效，未导出') }
+      try { decodeURIComponent(reference) } catch { throw new Error('图片路径编码无效，未导出') }
+      const relative = resolveImage(reference, note.path)
       if (!/\.(png|jpe?g|gif|webp)$/i.test(relative)) continue
-      relative = relative.startsWith('assets/') ? relative : path.join(path.dirname(note.path), relative)
       const image = safePath(this.root, relative)
       if (!existsSync(image) || !lstatSync(image).isFile()) throw new Error(`引用图片缺失：${reference}`)
-      files.add(path.relative(this.root, image))
+      const file = path.relative(this.root, image).replaceAll('\\', '/')
+      files.set(file, file)
     }
     mkdirSync(target, { recursive: true })
-    for (const file of files) {
-      const out = safePath(target, file)
+    for (const [file, inside] of files) {
+      const out = safePath(target, inside)
       mkdirSync(path.dirname(out), { recursive: true })
       copyFileSync(safePath(this.root, file), out)
     }

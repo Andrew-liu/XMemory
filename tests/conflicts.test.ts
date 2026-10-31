@@ -57,8 +57,8 @@ it('已有的 completedAt-only 冲突自动采用较早时间并归档', () => {
   l.refresh()
   expect(l.conflicts.size).toBe(0)
   expect(l.get(n.id).completedAt).toBe(earlierTime)
-  expect(JSON.parse(readFileSync(path.join(l.root, 'conflicts', `${conflictFile}.json`), 'utf8')).reason).toBe('completion-time')
-  expect(readdirSync(path.join(l.root, 'local')).some(f => f.startsWith('conflict-'))).toBe(true)
+  expect(JSON.parse(readFileSync(path.join(l.root, '.xmemeory', 'conflicts', `${conflictFile}.json`), 'utf8')).reason).toBe('completion-time')
+  expect(readdirSync(path.join(l.root, '.xmemeory', 'local')).some(f => f.startsWith('conflict-'))).toBe(true)
 })
 
 it.each(['incoming', 'both'] as const)('正文相同字段不同仍可显示并完整采用版本：%s', action => {
@@ -82,8 +82,8 @@ it('可证等价历史冲突归档但保留恢复副本；不完整旧记录不�
   const id = [...l.conflicts.keys()][0]
   l.refresh()
   expect(l.conflicts.size).toBe(0)
-  expect(JSON.parse(readFileSync(path.join(l.root, 'conflicts', `${id}.json`), 'utf8')).resolved).toBe(true)
-  expect(readdirSync(path.join(l.root, 'local')).some(f => f.startsWith('conflict-'))).toBe(true)
+  expect(JSON.parse(readFileSync(path.join(l.root, '.xmemeory', 'conflicts', `${id}.json`), 'utf8')).resolved).toBe(true)
+  expect(readdirSync(path.join(l.root, '.xmemeory', 'local')).some(f => f.startsWith('conflict-'))).toBe(true)
   l.addConflict(n, { ...n, hash: 'unknown-legacy-hash' })
   l.refresh()
   expect(l.conflicts.size).toBe(1)
@@ -99,14 +99,14 @@ it('同一文件的历史冲突链自动收敛为最新一条并保留恢复记�
       incoming: { ...n, body: `远端版本 ${index}`, hash: hash(incomingRaw) }, currentRaw, incomingRaw,
       createdAt: new Date(Date.UTC(2026, 8, 21, 12, index)).toISOString()
     }
-    writeFileSync(path.join(l.root, 'conflicts', `${conflict.id}.json`), JSON.stringify(conflict))
+    writeFileSync(path.join(l.root, '.xmemeory', 'conflicts', `${conflict.id}.json`), JSON.stringify(conflict))
   }
   l.refresh()
   expect(l.conflicts.size).toBe(1)
   expect([...l.conflicts.values()][0].incoming.body).toBe('远端版本 6')
-  const markers = readdirSync(path.join(l.root, 'conflicts')).map(file => JSON.parse(readFileSync(path.join(l.root, 'conflicts', file), 'utf8')))
+  const markers = readdirSync(path.join(l.root, '.xmemeory', 'conflicts')).map(file => JSON.parse(readFileSync(path.join(l.root, '.xmemeory', 'conflicts', file), 'utf8')))
   expect(markers.filter(value => value.reason === 'superseded')).toHaveLength(6)
-  expect(readdirSync(path.join(l.root, 'local')).filter(file => file.startsWith('conflict-'))).toHaveLength(6)
+  expect(readdirSync(path.join(l.root, '.xmemeory', 'local')).filter(file => file.startsWith('conflict-'))).toHaveLength(6)
 })
 
 it('处理期间原文再次变化时只刷新一条比较，重新确认后可完成', () => {

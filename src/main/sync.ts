@@ -1,8 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Library, atomic, decode, hash, safePath, walk, equivalentMarkdown, mergeCompletionTimeOnly } from './library'
 import { githubJson } from './github-request'
 import { SyncCache, gitBlobHash } from './sync-cache'
+import { ATTACHMENTS, LEGACY_ASSETS, PRIVATE, SCHEMA_VERSION, TRASH, logicalPath, privatePath } from './layout'
+import { migrateFiles, syncAllowedV1 } from './migrate'
 import type { Note } from '../shared/types'
 
 export function normalizeGithubToken(value: string) {
@@ -30,8 +32,9 @@ export function normalizeRepository(value: string) {
   return repo
 }
 
+/** Files synced by layout v2. Trashed notes sync under the path they had before deletion (see GithubSync.physical). */
 export function syncAllowed(file: string) {
-  return file === 'manifest.json' || /^(inspirations|memories|drafts|topics)\/[\w\u0080-\uFFFF .()/+-]+\.md$/.test(file) || /^(metadata|tombstones|conflicts)\/[\w-]+\.json$/.test(file) || /^metadata\/[\w-]+\.capture\.json$/.test(file) || /^assets\/[\w .()-]+\.(png|jpg|jpeg|webp|gif)$/i.test(file)
+  return file === 'manifest.json' || /^(inspirations|memories|drafts|topics)\/[\w\u0080-\uFFFF .()/+-]+\.md$/.test(file) || /^\.xmemeory\/(metadata|tombstones|conflicts)\/[\w-]+\.json$/.test(file) || /^\.xmemeory\/metadata\/[\w-]+\.capture\.json$/.test(file) || /^attachments\/[\w .()-]+\.(png|jpg|jpeg|webp|gif)$/i.test(file)
 }
 export function mergeChoice(base: string | undefined, local: string | undefined, remote: string | undefined): 'same' | 'local' | 'remote' | 'conflict' {
   if (local === remote) return 'same'
@@ -47,10 +50,33 @@ export async function runConfiguredStartupSync(sync: Pick<GithubSync, 'run'>, re
   try { await sync.run(repo, branch, token) } catch {}
   return true
 }
+/** Let queued input and IPC run between batches of synchronous file work on the main process. */
+export const yieldToEvents = () => new Promise<void>(resolve => setImmediate(resolve))
 export class GithubSync {
   running = false
   status = '尚未连接数据仓库'
+  private hashCache = new Map<string, { mtimeMs: number; size: number; digest: string }>()
   constructor(private library: Library, private changed: () => void, private request: typeof fetch = (input, init) => fetch(input, init), private editorDirty: () => boolean = () => false) {}
+  /** Logical sync path -> library-relative file on disk: a trashed note lives under .xmemeory/trash with the same relative path. */
+  private physical(file: string) {
+    const root = this.library.root
+    return !existsSync(path.join(root, file)) && existsSync(path.join(root, TRASH, file)) ? `${TRASH}/${file}` : file
+  }
+  /** Logical paths of every local file that syncs. */
+  private localFiles() {
+    const root = this.library.root
+    const files = [...walk(root), ...['metadata', 'tombstones', 'conflicts'].flatMap(folder => walk(root, `${PRIVATE}/${folder}`)), ...walk(root, TRASH).map(logicalPath)]
+    return [...new Set(files)].filter(syncAllowed)
+  }
+  /** Content hash, reused while the file's mtime and size are unchanged. */
+  localHash(file: string) {
+    const stat = lstatSync(file)
+    const cached = this.hashCache.get(file)
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.digest
+    const digest = hash(readFileSync(file))
+    this.hashCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, digest })
+    return digest
+  }
   check(repo: string, branch: string, token: string) { return this.run(repo, branch, token, true) }
   async run(repo: string, branch: string, token: string, checkOnly = false) {
     if (this.running) throw new Error('正在检查或同步，请等待当前操作结束')
@@ -59,7 +85,7 @@ export class GithubSync {
     if (!/^[\w./-]+$/.test(branch) || branch.includes('..') || branch.includes('//') || branch.startsWith('-') || branch.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) throw new Error('请填写有效分支名，例如 main 或 master')
     token = normalizeGithubToken(token)
     this.running = true
-    const stateFile = path.join(this.library.root, 'local', `sync-${hash(repo+branch).slice(0,16)}.json`)
+    const stateFile = privatePath(this.library.root, 'local', `sync-${hash(repo+branch).slice(0,16)}.json`)
     let authenticatedAs = ''
     const updateStatus = (message: string) => { this.status = message; this.changed() }
     const api = async (endpoint: string, method = 'GET', body?: unknown, tolerated?: number): Promise<any> => {
@@ -93,54 +119,83 @@ export class GithubSync {
         this.status = `连接检查通过${authenticatedAs ? `（@${authenticatedAs}）` : ''}：可读取私库 ${repo} 的 ${branch} 分支。未上传内容；写入仍需 Contents: Read and write 权限`
         return
       }
-      const state: { hashes: Record<string,string>; time?: string; lastRemoteSha?: string; lastTreeSha?: string } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : { hashes: {} }
+      // legacyHashes: the v1 baseline kept by the local layout upgrade, until the remote has been upgraded too.
+      const state: { hashes: Record<string,string>; legacyHashes?: Record<string,string>; time?: string; lastRemoteSha?: string; lastTreeSha?: string } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : { hashes: {} }
       const cache = new SyncCache(this.library.root, hash(JSON.stringify([repo, branch])).slice(0, 24))
       for (let attempt = 1; attempt <= 3; attempt++) {
         const head = await api(`git/ref/heads/${branch}`)
-        const remoteChanged = state.lastRemoteSha !== head.object.sha || !state.lastTreeSha
+        const remoteChanged = state.lastRemoteSha !== head.object.sha || !state.lastTreeSha || !!state.legacyHashes
         const merged = new Map<string, Buffer>()
         let baseline = state.hashes
+        // Three-way merge base; differs from the upload baseline only when the remote is upgraded in this round.
+        let mergeBase = state.hashes
+        let legacyPaths: string[] = []
+        let remoteShas = new Set<string>()
         let baseTreeSha = state.lastTreeSha || ''
         let pulled = 0, downloaded = 0, reused = 0, cached = 0, metadataConflicts = 0
         if (remoteChanged) {
           const commit = await api(`git/commits/${head.object.sha}`)
           const tree = await api(`git/trees/${commit.tree.sha}?recursive=1`)
           if (tree.truncated) throw new Error('远端目录过大，本次未读取完整，停止同步')
-          const remote = new Map<string, Buffer>()
-          const entries = tree.tree.filter((e: any) => syncAllowed(e.path))
-          for (const e of entries) {
+          let remote = new Map<string, Buffer>()
+          const load = async (e: any, legacy: boolean): Promise<Buffer> => {
             if (e.mode !== '100644' || e.type !== 'blob' || e.size > 20*1024*1024) throw new Error('远端包含不支持的对象或超限文件')
-            const target = safePath(this.library.root, e.path)
             if (typeof e.sha !== 'string' || !/^[\w-]+$/.test(e.sha)) throw new Error('远端文件标识无效')
+            // A v1 image is already on disk under attachments/ after the local upgrade.
+            const localPath = legacy && e.path.startsWith(`${LEGACY_ASSETS}/`) ? `${ATTACHMENTS}/${e.path.slice(LEGACY_ASSETS.length + 1)}` : e.path
+            const target = safePath(this.library.root, this.physical(localPath))
             const local = existsSync(target) ? readFileSync(target) : undefined
-            if (local && gitBlobHash(local) === e.sha) {
-              remote.set(e.path, local); reused++; cache.put(local); continue
-            }
+            if (local && gitBlobHash(local) === e.sha) { reused++; cache.put(local); return local }
             const saved = cache.read(e.sha)
-            if (saved) { remote.set(e.path, saved); cached++; continue }
+            if (saved) { cached++; return saved }
             const blob = await api(`git/blobs/${e.sha}`)
             if (blob.encoding !== 'base64') throw new Error('远端文件编码不支持')
             const content = Buffer.from(blob.content, 'base64')
             if (content.length > 20 * 1024 * 1024) throw new Error('远端文件超出大小限制')
             if (/^[a-f0-9]{40}$/.test(e.sha) && gitBlobHash(content) !== e.sha) throw new Error('远端文件完整性校验失败，已停止同步')
-            remote.set(e.path, content); downloaded++; cache.put(content)
+            downloaded++; cache.put(content)
+            return content
           }
-          const remoteManifest = remote.get('manifest.json')
-          if (remoteManifest && JSON.parse(remoteManifest.toString()).schemaVersion !== 1) throw new Error('远端资料库版本不兼容')
+          const manifestEntry = tree.tree.find((e: any) => e.path === 'manifest.json')
+          const manifestContent = manifestEntry ? await load(manifestEntry, false) : undefined
+          const remoteVersion = manifestContent ? JSON.parse(manifestContent.toString()).schemaVersion : SCHEMA_VERSION
+          if (remoteVersion !== 1 && remoteVersion !== SCHEMA_VERSION) throw new Error('远端资料库版本不兼容')
+          const legacyRemote = remoteVersion === 1
+          const entries = tree.tree.filter((e: any) => legacyRemote ? syncAllowedV1(e.path) : syncAllowed(e.path))
+          remoteShas = new Set(tree.tree.map((e: any) => e.sha))
+          let scanned = 0
+          for (const e of entries) {
+            if (++scanned % 50 === 0) await yieldToEvents()
+            remote.set(e.path, e.path === 'manifest.json' && manifestContent ? manifestContent : await load(e, legacyRemote))
+          }
+          if (legacyRemote) {
+            // The remote still has the v1 layout: upgrade it the same way the local library was, keeping the local
+            // path for notes this device already has, then push the whole v2 tree and delete the v1 paths.
+            this.status = '升级远端资料库结构…'; this.changed()
+            const migrated = migrateFiles(remote, new Map([...this.library.notes.values()].map(n => [n.id, logicalPath(n.path)])))
+            const legacy = state.legacyHashes || state.hashes
+            mergeBase = {}
+            for (const [old, content] of remote) {
+              const target = migrated.paths.get(old)
+              if (target && legacy[old] === hash(content)) mergeBase[target] = hash(migrated.files.get(target)!)
+            }
+            legacyPaths = entries.map((e: any) => e.path)
+            remote = migrated.files
+          }
           if (this.editorDirty()) throw new Error('检测到正在编辑的未保存内容，本轮同步已延后；保存完成后可重新同步')
           this.status = '比较本地与远端内容…'; this.changed()
           this.library.refresh()
           for (const [file, content] of remote) merged.set(file, content)
-          const paths = new Set([...remote.keys(), ...walk(this.library.root).filter(syncAllowed)])
+          const paths = new Set([...remote.keys(), ...this.localFiles()])
           for (const file of paths) {
-            const target = safePath(this.library.root, file)
+            const target = safePath(this.library.root, this.physical(file))
             const local = existsSync(target) ? readFileSync(target) : undefined
             const theirs = remote.get(file)
             // Missing files are not deletion commands. Tombstones are the only portable deletion signal.
             if (!local && theirs) { atomic(target, theirs); pulled++; continue }
             if (local && !theirs) { merged.set(file, local); continue }
             if (!local || !theirs) continue
-            const choice = mergeChoice(state.hashes[file], hash(local), hash(theirs))
+            const choice = mergeChoice(mergeBase[file], hash(local), hash(theirs))
             if (choice === 'local' || choice === 'same') merged.set(file, local)
             else if (choice === 'remote') { atomic(target, theirs); pulled++ }
             else if (file.endsWith('.md')) {
@@ -152,7 +207,7 @@ export class GithubSync {
                 if (!content.equals(local)) { atomic(target, content); pulled++ }
                 continue
               }
-              const current = [...this.library.notes.values()].find(n => n.path === file)
+              const current = [...this.library.notes.values()].find(n => logicalPath(n.path) === file)
               if (!current) throw new Error('无法关联冲突正文，已保留文件并停止')
               const parsed = decode(theirs.toString())
               const incoming: Note = { ...current, body: parsed.body, title: String(parsed.metadata.title || current.title), hash: hash(theirs), updatedAt: String(parsed.metadata.updatedAt || '远端版本') }
@@ -162,24 +217,32 @@ export class GithubSync {
               }
               this.library.addConflict(current, incoming, { currentRaw: local.toString(), incomingRaw: theirs.toString() })
               merged.set(file, local)
-            } else if (file.startsWith('assets/')) {
+            } else if (file.startsWith(`${ATTACHMENTS}/`)) {
               throw new Error('同名图片内容不同，停止同步以避免覆盖；请重命名其中一份')
             } else if (file !== 'manifest.json') {
               // Preserve both metadata variants without aborting the whole sync. The local variant is
               // uploaded as the shared baseline, while the remote variant remains recoverable locally.
-              const recovery = path.join(this.library.root, 'local', `sync-conflict-${hash(file).slice(0,16)}.json`)
+              const recovery = privatePath(this.library.root, 'local', `sync-conflict-${hash(file).slice(0,16)}.json`)
               atomic(recovery, JSON.stringify({ path: file, local: local.toString('base64'), remote: theirs.toString('base64') }))
               merged.set(file, local)
               metadataConflicts++
             }
           }
-          for (const file of walk(this.library.root, 'conflicts').filter(syncAllowed)) merged.set(file, readFileSync(safePath(this.library.root, file)))
-          baseline = Object.fromEntries([...remote].map(([file, content]) => [file, hash(content)]))
+          for (const file of walk(this.library.root, `${PRIVATE}/conflicts`).filter(syncAllowed)) merged.set(file, readFileSync(safePath(this.library.root, file)))
+          // After a remote upgrade nothing exists yet at the v2 paths, so everything counts as changed.
+          baseline = legacyPaths.length ? {} : Object.fromEntries([...remote].map(([file, content]) => [file, hash(content)]))
           baseTreeSha = commit.tree.sha
         } else {
           if (this.editorDirty()) throw new Error('检测到正在编辑的未保存内容，本轮同步已延后；保存完成后可重新同步')
-          this.library.refresh()
-          for (const file of walk(this.library.root).filter(syncAllowed)) merged.set(file, readFileSync(safePath(this.library.root, file)))
+          // Remote unchanged: only files whose content differs from the last synced baseline need reading.
+          // Hashes are cached by mtime+size so an idle library is not re-read and re-hashed every round.
+          const files = this.localFiles()
+          for (let i = 0; i < files.length; i++) {
+            if (i % 50 === 49) await yieldToEvents()
+            const target = safePath(this.library.root, this.physical(files[i]))
+            if (state.hashes[files[i]] === this.localHash(target)) continue
+            merged.set(files[i], readFileSync(target))
+          }
         }
         const changes: any[] = []
         const uploadedHashes: Record<string, string> = {}
@@ -188,13 +251,18 @@ export class GithubSync {
           if (baseline[file] === hash(content)) continue
           if (content.length > 20*1024*1024) throw new Error('文件超过单文件同步限制，仍保留本地')
           bytes += content.length
+          // Same bytes already stored remotely (e.g. an image moved from assets/ to attachments/): reference, don't upload.
+          const existing = gitBlobHash(content)
+          if (remoteShas.has(existing)) { changes.push({ path: file, mode: '100644', type: 'blob', sha: existing }); uploadedHashes[file] = hash(content); bytes -= content.length; continue }
           if (bytes > 100*1024*1024) throw new Error('本轮变化超过 100 MiB，尚未提交远端；需要分批同步支持')
-          this.status = `上传 ${file.startsWith('assets/') ? '图片' : '内容'}…`; this.changed()
+          this.status = `上传 ${file.startsWith(`${ATTACHMENTS}/`) ? '图片' : '内容'}…`; this.changed()
           const blob = await api('git/blobs', 'POST', { content: content.toString('base64'), encoding: 'base64' })
           cache.put(content)
           changes.push({ path: file, mode: '100644', type: 'blob', sha: blob.sha })
           uploadedHashes[file] = hash(content)
         }
+        // v1 paths left behind by a remote upgrade are removed from the tree.
+        for (const file of legacyPaths) if (!merged.has(file)) changes.push({ path: file, mode: '100644', type: 'blob', sha: null })
         let headSha = head.object.sha, treeSha = baseTreeSha
         if (changes.length) {
           const newTree = await api('git/trees', 'POST', { base_tree: baseTreeSha, tree: changes })
@@ -210,7 +278,8 @@ export class GithubSync {
         }
         atomic(stateFile, JSON.stringify({ hashes: remoteChanged ? mergedHashes(merged) : { ...state.hashes, ...uploadedHashes }, lastRemoteSha: headSha, lastTreeSha: treeSha, time: new Date().toISOString() }))
         if (remoteChanged) cache.prune(new Set([...merged.values()].map(gitBlobHash)))
-        this.library.refresh()
+        // Nothing local was written when the remote was unchanged; the watcher already tracks local edits.
+        if (remoteChanged) this.library.refresh()
         const pending = this.library.conflicts.size
         this.status = `${remoteChanged ? `已拉取 ${pulled} 项远端更新` : '远端无更新'} · 已上传 ${changes.length} 项`
         if (pending || metadataConflicts) this.status += `，${pending} 项正文冲突待处理${metadataConflicts ? `，${metadataConflicts} 项元数据差异已保留恢复记录` : ''}`

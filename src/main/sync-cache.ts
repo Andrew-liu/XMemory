@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, lstatSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { atomic, safePath } from './library'
+import { PRIVATE } from './layout'
 
 export function gitBlobHash(bytes: Buffer) {
   return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
@@ -9,7 +10,7 @@ export function gitBlobHash(bytes: Buffer) {
 const validSha = (sha: string) => /^[a-f0-9]{40}$/.test(sha)
 export class SyncCache {
   constructor(private root: string, private scope: string) {}
-  private file(sha: string) { return safePath(this.root, `local/sync-cache/${this.scope}/${sha}`) }
+  private file(sha: string) { return safePath(this.root, `${PRIVATE}/local/sync-cache/${this.scope}/${sha}`) }
   read(sha: string): Buffer | undefined {
     if (!validSha(sha)) return
     try {
@@ -26,7 +27,7 @@ export class SyncCache {
   }
   prune(keep: Set<string>) {
     try {
-      const directory = safePath(this.root, `local/sync-cache/${this.scope}`)
+      const directory = safePath(this.root, `${PRIVATE}/local/sync-cache/${this.scope}`)
       for (const name of readdirSync(directory)) {
         if (validSha(name) && !keep.has(name)) { const file = this.file(name); if (lstatSync(file).isFile()) unlinkSync(file) }
       }

@@ -12,6 +12,7 @@ import { findAllSearchMatches, findSearchMatch } from '../shared/search-location
 import { prepareMarkdown, splitPastedLineBreaks } from './markdown'
 import { Fragment, Slice } from '@tiptap/pm/model'
 import { TypedMarkdownLink, linkAddress } from './links'
+import { ASSET_SCHEME, assetURL, imageReference } from '../shared/assets'
 
 const SEARCH_HIGHLIGHT = 'xm-search'
 /** Map an offset range in the concatenated text of `nodes` back to a DOM Range. */
@@ -103,14 +104,14 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
     const input = sourceInput.current
     if (input) {
       const start = input.selectionStart, end = input.selectionEnd
-      const markdown = images.map(image => `![${image.name.replace(/[\\[\]]/g, '\\$&')}](../${image.relative})`).join('\n\n')
+      const markdown = images.map(image => `![${image.name.replace(/[\\[\]]/g, '\\$&')}](${imageReference(image.relative, data.current.note.path)})`).join('\n\n')
       const text = data.current.body
       update(text.slice(0, start) + markdown + text.slice(end))
       requestAnimationFrame(() => {
         if (sourceInput.current === input) { input.focus(); input.setSelectionRange(start + markdown.length, start + markdown.length) }
       })
     } else {
-      for (const image of images) editor.chain().focus().setImage({ src: '../' + image.relative, alt: image.name }).run()
+      for (const image of images) editor.chain().focus().setImage({ src: imageReference(image.relative, data.current.note.path), alt: image.name }).run()
     }
   }
   const LocalImage = Image.extend({
@@ -122,7 +123,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
     addNodeView() {
       return ({ node }) => {
         const img = document.createElement('img'); img.alt = String(node.attrs.alt || '图片'); img.className = 'local-image'; img.dataset.localSrc = String(node.attrs.src || '')
-        if (!/^https?:|^data:|^file:/i.test(node.attrs.src)) void window.xm.asset(node.attrs.src, data.current.note.path).then(src => { img.src = src }).catch(() => { img.alt = '图片缺失或不可访问' })
+        if (!/^https?:|^data:|^file:/i.test(node.attrs.src)) { img.addEventListener('error', () => { img.alt = '图片缺失或不可访问' }, { once: true }); img.src = assetURL(String(node.attrs.src), data.current.note.path) }
         else img.alt = '远程图片尚未导入，请粘贴图片文件'
         img.addEventListener('contextmenu', event => {
           event.preventDefault()
@@ -131,7 +132,7 @@ export const NoteEditor = forwardRef<EditorHandle, { searchLocation?: { query: s
         })
         img.addEventListener('dblclick', event => {
           event.preventDefault(); event.stopPropagation()
-          if (!img.src.startsWith('data:image/') || !img.complete || !img.naturalWidth) { error('图片尚未加载或本地文件缺失'); return }
+          if (!img.src.startsWith(`${ASSET_SCHEME}:`) || !img.complete || !img.naturalWidth) { error('图片尚未加载或本地文件缺失'); return }
           setOriginalSize(false); setImageMessage('')
           setPreview({ src: img.src, relative: img.dataset.localSrc || '', alt: img.alt })
         })

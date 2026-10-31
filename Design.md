@@ -1,5 +1,147 @@
 # XMemeory 设计方案
 
+## v0.7.0 — Mac 支持、卡顿治理、记忆存储兼容 Obsidian（已确认，2026-10-31）
+
+状态：已确认（2026-10-31）。三项需求来自用户 2026-10-31：①支持 Mac（此前测试全部基于 Windows）；②优化经常出现的莫名卡顿、无响应；③重做记忆系统，兼容 Obsidian。
+
+确认范围（用户 2026-10-31 答复草案中的 8 个待确认问题）：
+- Mac 只支持 Apple Silicon（arm64），不出 Intel 包。
+- 没有 Apple 开发者账号：只出未签名、未公证的包，首次打开需手动放行，README 写明步骤。
+- Obsidian 直接打开整个资料库目录即可作为独立 vault 加载；不放进用户现有的 `ClaudeCode/Obsidian` vault。
+- 记忆文件名采用“日期 作者 - 标题”。
+- Obsidian 只看不改：不为 Obsidian 中的编辑做实时同步或冲突处理（沿用现有文件监听，外部改动照旧读入即可，不作为验收项）。
+- “重做”只指存储结构兼容 Obsidian，不做 MOC 索引页、标签体系或灵感-记忆自动双链。
+- 卡顿出现在编辑灵感、搜索记忆、阅读记忆时，每次卡好几秒无响应。
+- 三项合并为一个版本 v0.7.0 发布。
+
+### 背景与调查结论（只读调查，2026-10-31，Mac 工作副本）
+
+环境现状：
+- Mac 工作副本 `~/Develop/ClaudeCode/Code/XMemory` 经 NAS 同步，没有 `.git`（`.stignore` 排除了点文件），提交前需按既有流程从远端恢复 `.git`。
+- 本机 macOS 26.6.2 / arm64，Node 26.7.0，没有 pnpm；`node_modules` 只同步了部分包（无 electron），需要重新安装依赖。
+- `release/` 只有 Windows 产物，Mac 从未构建或运行过。
+
+Mac 不可用或未验证的代码点：
+- `src/main/x-capture.ts` 的 `chromeCandidates()` 只查 `PROGRAMFILES`/`LOCALAPPDATA` 下的 `chrome.exe`，Mac 上 `findChrome()` 必然返回空，X 登录、自动采集、重新采集全部不可用。
+- 错误提示写死“任务管理器”等 Windows 用语。
+- `package.json` 的 `mac` 打包未配置图标（只有 `build/icon.ico`），且同时打 x64 与 arm64。
+- 托盘图标是彩色图，Mac 菜单栏应使用模板图（黑白，随明暗自动反色）。
+- Mac 关窗/Dock 行为、开机自启、`safeStorage`（钥匙串授权弹窗）、App Nap 对后台采集的节流均未验证。
+
+卡顿根因（按用户描述的三个场景重新排查，渲染进程主线程或主进程被同步长任务占用）：
+- 搜索记忆：记忆页搜索框没有防抖，每敲一个字都在渲染线程对全部记忆做 `normalize('NFKC')` + 小写 + 全文 `includes`（`memoryMatches`），再对每条结果用 `matchSnippet` 切片、`HighlightedText` 拆分高亮，然后整列表一次性渲染全部卡片（无虚拟列表）。记忆多、长文多时单次按键就是数百毫秒到数秒。
+- 编辑灵感：编辑器每 550ms 自动保存一次，保存后 `savedNote` 生成新的 `notes` 数组，触发整个 App 重渲染（侧栏计数、日历、列表都对全部笔记重新过滤排序）；`NoteEditor` 的反向链接 `backlinks` 依赖 `notes`，每次保存都对全部笔记正文做两次 `includes`；全局搜索 effect 依赖 `state?.notes`，即使不在搜索页，每次保存也会向主进程发一次 FTS 搜索。
+- 阅读记忆：编辑器里的每张本地图片都经 `asset` IPC 让主进程 `readFileSync` 整个文件再转 base64 data URL 返回；长文图片多时主进程被连续同步读文件与编码占满，期间渲染端的其他 IPC（含保存）全部排队。打开一条记忆还会用 Tiptap 解析完整 Markdown，并同样触发反向链接全量遍历。
+- 背景因素：GitHub 自动同步（启动时与每 10 分钟）一轮内 2~3 次 `library.refresh()` 全量重读 Markdown 并重建 FTS；自动采集每保存一条就广播 `xm:changed`，渲染端拉取含全部正文的完整快照。二者会放大以上场景的卡顿。
+
+现有记忆存储与 Obsidian 的差异：
+- 已是“文件夹 + Markdown + YAML Front Matter”，Obsidian 可直接打开，支持 `[[双链]]`。
+- 不兼容处：①记忆文件为 `memories/<账号ID>/<推文ID>.md`，在 Obsidian 里无法辨认；②`metadata/`、`tombstones/`、`conflicts/`、`local/`（含 SQLite）、`manifest.json` 与笔记混在根目录，会出现在 Obsidian 文件树与搜索中；③删除只写 tombstone，文件仍在原处，Obsidian 里看起来没删；④Front Matter 字段不符合 Obsidian 常用约定（`tags`、`aliases`、`created`）。
+- 同步不传播“文件消失”，删除完全依赖 tombstone；因此删除改为移动文件时必须同步处理路径变化（见技术方案）。
+
+### 功能范围与非目标
+
+范围：
+- Mac arm64：能安装、启动、登录 X、自动采集、重新采集、GitHub 同步、菜单栏托盘、开机自启；全部桌面专项在 Mac 跑通。
+- 卡顿：编辑灵感、搜索记忆、阅读记忆三个场景不再出现可感知卡顿（指标见验收标准）。
+- 存储：资料库根目录可被 Obsidian 直接“打开文件夹作为仓库”，文件树里只看到可读的笔记与附件，正文、图片、双链、属性正常显示；旧库自动迁移，零数据丢失。
+
+非目标：
+- 不支持 Intel Mac；不签名、不公证、不上架 App Store。
+- 不做 Obsidian 插件，不依赖 Obsidian 运行；不保证 Obsidian 中编辑后的冲突处理。
+- 不做 MOC、标签体系、自动双链等组织方式改造。
+- 本版不把索引或同步移到独立进程（utilityProcess）；若优化后埋点仍有长任务再评估。
+
+### 技术方案与模块职责
+
+一、Mac 支持（`x-capture.ts`、`index.ts`、`tray-icon.ts`、`package.json`）
+- `findChrome()` 增加 Mac 候选：`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` 及 `~/Applications` 下同名路径；找不到时提示安装 Chrome。
+- 错误提示按平台区分（“活动监视器”/“任务管理器”），快捷键提示显示 `⌘`/`Ctrl`。
+- 打包：由 `docs/images/logo.svg` 生成 `build/icon.icns`；`pack:mac` 改为只打 arm64，产出 dmg + zip，`identity: null` 跳过签名。
+- 托盘：Mac 使用 `Template` 模板图；关窗驻留后台，Dock 点击恢复窗口；`Cmd+Q` 走现有保存确认流程。
+- 采集期间 `powerSaveBlocker.start('prevent-app-suspension')`，结束即停止，避免 App Nap 让专属 Chrome 翻页变慢。
+- 未签名包首次打开：README 写明“右键打开”或在“系统设置 → 隐私与安全性”放行，必要时 `xattr -dr com.apple.quarantine`。
+
+二、卡顿治理（`src/renderer/*`、`library.ts`、`index.ts`、`sync.ts`）
+- 埋点先行：主进程对 `refresh`、`save`、`search`、`asset`、快照序列化、同步各阶段记耗时；渲染端用 `PerformanceObserver('longtask')` 记录长任务；超过 100ms 写入 `.xmemeory/local/perf.log`。先用 2000 条合成记忆复现三个场景出基线数据。
+- 搜索记忆：搜索框输入防抖（约 200ms）并用 `useDeferredValue`；记忆的规范化小写文本按 `id + hash` 缓存，不再每次按键重算；普通词改走主进程 SQLite FTS（`kind=memory`），`@作者`、`不完整` 仍在本地过滤；列表改为分批/虚拟渲染，只渲染可视区域附近的卡片。
+- 编辑灵感：全局搜索 effect 去掉对 `state.notes` 的依赖，只在搜索页可见且条件变化时查询；`backlinks` 改为主进程维护的链接索引（保存时增量更新），编辑器按需查询，不再每次保存遍历全部正文；列表、日历、侧栏计数用 `useMemo` 按 notes 版本缓存，保存只替换单条。
+- 阅读记忆：注册自定义协议 `xm-asset://`（`protocol.handle` + 异步流式读取），图片直接由协议加载，不再经 IPC 传 base64；复制图片等少数场景仍走现有接口。
+- 快照瘦身：`xm:changed` 携带变化类型和 ID，渲染端局部更新；采集期间的变化事件合并节流（500ms）。
+- 同步：一轮只在结束时按变更文件增量 `reloadOne`，不再多次全量 `refresh()`；本地哈希按 mtime+size 缓存。
+
+三、存储结构 v2（兼容 Obsidian）（`library.ts`、`sync.ts`、新增 `migrate.ts`）
+- 目录：笔记目录 `inspirations/`、`memories/`、`topics/`、`drafts/` 保持；图片目录 `assets/` 改名 `attachments/`；应用私有数据（`manifest.json`、`metadata/`、`tombstones/`、`conflicts/`、`local/`、索引）全部移入根目录 `.xmemeory/`。Obsidian 默认不显示、不索引点目录。
+- 记忆文件名：`memories/YYYY/YYYY-MM-DD 作者 - 标题前 40 字.md`。日期取 X 发布时间（缺失用保存时间）；去掉 `\/:*?"<>|#^[]` 等 Obsidian 或 Windows 不允许的字符与首尾空格、点；同名时追加推文 ID 后缀。身份以 Front Matter 中的 `xmemeory_id` 为准，改名不影响判重和采集去重。
+- Front Matter：写入 `tags`、`aliases`（原标题）、`created`、`updated`、`source`、`author`、`published`，保留 `xmemeory_id`、`type` 等应用字段；读取兼容旧字段名。
+- 图片引用：正文统一用相对笔记的标准 Markdown 路径 `![](../../attachments/x.png)`，Obsidian 与 XMemeory 均可显示；读取兼容旧 `assets/` 路径与 `![[x.png]]`。
+- Obsidian 配置：首次迁移或新建资料库时，若根目录无 `.obsidian/`，写入最小 `.obsidian/app.json`（附件目录 `attachments`、使用标准 Markdown 链接）；已存在则不改。`.obsidian/` 不参与 GitHub 同步。
+- 删除：Markdown 移入 `.xmemeory/trash/<相对路径>`，tombstone 仍保留并参与同步；恢复时移回原路径。同步按 `xmemeory_id` 识别同一条笔记的路径变化，避免远端旧路径被重新拉回。
+- 迁移（`schemaVersion` 1 → 2）：首次打开旧库时，先把整个资料库复制到 `.xmemeory/backup-<时间>/`（不含已有备份），再按“移动私有目录 → 移动附件并改写图片引用 → 记忆改名 → 改写 Front Matter”执行；进度写入 `.xmemeory/migration.json`，中断后重启继续；完成后校验条目数、正文哈希（忽略被改写的图片路径与字段）、图片引用全部可解析，失败则自动从备份回滚并提示。
+- 同步兼容：`syncAllowed` 改为新路径；远端仍是 v1 时由首个升级的设备迁移后推送；旧版 App 读到 `schemaVersion` 2 拒绝写入并提示升级。
+
+### 接口与数据结构
+
+- 新增 IPC：`backlinks(id)`、`searchMemory(query)`；`asset` 保留但阅读路径改用 `xm-asset://<相对路径>`（只允许资料库内 `attachments/` 与兼容旧路径，`safePath` 校验，拒绝越界与符号链接）。
+- `xm:changed` 事件载荷：`{ kind: 'note' | 'full', ids?: string[] }`。
+- `manifest.json` 迁移到 `.xmemeory/manifest.json`，`schemaVersion: 2`；新增 `.xmemeory/migration.json`（步骤、已完成文件列表、备份路径）。
+
+### 异常与边界
+
+- Chrome 未安装：Mac 上给出下载指引，不崩溃。
+- 迁移中断：以 `migration.json` 继续；校验失败或用户选择回滚时从备份恢复为 v1。
+- 资料库所在磁盘空间不足以备份：中止迁移、不改动任何文件并提示。
+- 文件名冲突或超长：追加推文 ID 后缀，文件名总长截断到 120 字符以内。
+- 作者或标题为空：用 `X` 或“无标题”占位。
+- 多设备同步时一台已升级、一台未升级：旧版停止同步并提示升级；不会互相覆盖。
+- Obsidian 中误改文件：XMemeory 照旧作为外部修改读入；不提供额外冲突保护（非目标）。
+
+### 兼容性与数据迁移
+
+- 持久化格式不兼容变更（目录、文件名、字段、删除方式），迁移前强制备份，可回滚。
+- Windows 与 Mac 都需升级到 0.7.0 后才能继续同步；README 与 ChangeLog 说明升级顺序。
+- 旧备份由用户自行删除，应用不自动清理。
+
+### 阶段任务
+
+1. 搭建 Mac 开发环境：恢复 `.git`、安装 pnpm 与依赖、跑通类型检查、单元测试与桌面专项，记录 Mac 上原本失败的测试。
+2. 卡顿埋点与基线：生成 2000 条合成记忆（含长文与图片），测三个场景的耗时与长任务。
+3. 卡顿优化：搜索、编辑、阅读三个场景及快照/同步按数据逐项改，复测对比。
+4. 存储 v2：迁移器、读写、命名、删除、附件协议、同步路径变化，补充单元测试。
+5. Mac 适配：Chrome 路径、文案、图标、托盘、App Nap、arm64 打包。
+6. Mac 全量回归（Windows 回归需在 Windows 机器执行，见验收说明），更新 README、ChangeLog，提交并打 tag `v0.7.0`。
+
+### 功能测试用例
+
+- Mac：dmg 安装后启动；登录 X、手动重新采集、自动采集一轮；GitHub 同步；关闭窗口后从 Dock/菜单栏恢复；开机自启；现有桌面专项全部通过。
+- 搜索记忆：2000 条合成记忆下，在记忆搜索框连续输入 10 个字符，每次按键到输入框显示不超过 100ms，结果在 300ms 内更新；渲染端无超过 200ms 的长任务。
+- 编辑灵感：2000 条记忆的资料库中连续输入 60 秒（跨越多次自动保存），按键延迟不超过 100ms，无超过 200ms 的长任务；保存期间不触发全局搜索请求。
+- 阅读记忆：打开一条含 30 张图片的长文，正文 500ms 内可滚动；图片加载期间在另一灵感中输入不卡顿；图片经 `xm-asset://` 加载，越界路径被拒绝。
+- Obsidian：用 Obsidian 打开迁移后的资料库，文件树中只看到笔记目录和 `attachments/`；记忆文件名为“日期 作者 - 标题”；正文、图片、双链、属性面板显示正常；XMemeory 中删除的条目在 Obsidian 中消失，恢复后重新出现。
+- 迁移：合成旧库迁移前后条目数、正文、图片一致；迁移中途强制退出后重启可继续；注入校验失败可自动回滚；回滚后 v0.6.0 能正常打开。
+- 同步：迁移后的设备推送，另一 0.7.0 设备拉取后结构一致；删除与恢复在两端一致；旧版读到 v2 拒绝写入。
+
+### 验收标准
+
+- Mac arm64 未签名包可安装运行，现有功能可用，桌面专项全部通过。
+- 三个卡顿场景用例达标，附优化前后埋点数据对比。
+- Obsidian 与迁移用例全部通过，旧库迁移零数据丢失。
+- 说明：本机只有 Mac，Windows 平台回归无法在本机执行；发布前在 ChangeLog 如实注明 Windows 未验证范围，或由用户在 Windows 上运行测试后补记。
+
+### 实现记录与相对设计的偏差（2026-10-31，开发完成后补记）
+
+与设计一致：Mac arm64 适配与未签名（临时签名）打包、`xm-asset://` 图片协议、`.xmemeory/` 私有目录、`attachments/`、“日期 作者 - 标题”命名、Obsidian 字段、回收站移动、旧库备份迁移与回滚、远端旧结构自动升级、旧版拒绝新结构。
+
+偏差与未做：
+- 文件名中的日期按 UTC 计算（设计未写明时区）。按本机时区会让不同时区的设备得到不同文件名，同步时产生重复。
+- 搜索记忆未改走主进程 SQLite FTS，也没有做虚拟列表；改为按笔记缓存搜索文本、`useDeferredValue` 延迟列表更新、每批渲染 60 条（滚动或点“显示更多”继续加载）。实测已达标，因此没有再引入新的 IPC `searchMemory`。
+- 反向链接仍在渲染端遍历计算，未增加主进程链接索引与 `backlinks(id)` 接口；`xm:changed` 也未携带变化类型与 ID，快照未瘦身，采集期间事件未做 500ms 合并。这些在合成数据的编辑场景下未表现出卡顿（按键最大 33ms），因此暂不做；真实资料库上若仍卡再评估。
+- 未做耗时埋点写入 `.xmemeory/local/perf.log`，改用测试内的 `PerformanceObserver` 长任务与逐帧间隔测量（`tests/desktop-perf.ts`）。
+- 标题同时写入 `aliases`（设计只写了保留原标题）：这样 Obsidian 里可按标题解析 `[[标题]]`，UUID 命名的灵感与选题才能被双链找到。
+- 升级提示在界面显示 60 秒后消失，备份位置记录在 README 与 ChangeLog。
+- `.obsidian/app.json` 只在新建库或旧库升级且不存在 `.obsidian/` 时写入。
+- 验收：Windows 回归未执行；真实 X 账号、真实 GitHub 私库、开机自启与钥匙串在 Mac 上均未验证；未安装 Obsidian 实际打开验证。见 ChangeLog。
+
 ## v0.6.0 — 和风极简全面视觉重构（已确认，2026-10-27）
 
 状态：已确认（2026-10-27）。用户从 `design/style-options/` 的六版预览中选定“05 和风极简”，要求全面重构，并确定：删除原有六套配色，只保留“和纸”亮、暗两版，暗版必须保证文字看得清；衬线字体使用思源宋体（随应用打包）。本节取代 v0.5.7 第 3、4 项中“不换配色、只做微调”的约束；v0.5.7 第 1、2 项（修改连接折叠、关于区对齐）并入本版本一起做。

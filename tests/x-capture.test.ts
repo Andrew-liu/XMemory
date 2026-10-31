@@ -231,8 +231,8 @@ it('批量与单条共用落盘输出一致，capture.json 标记书签来源', 
     expect(single.result).toBe('created')
     expect(batch.result).toBe('created')
     expect(libB.get(batch.noteId).body).toBe(libA.get(single.noteId).body)
-    const jsonA = JSON.parse(readFileSync(path.join(rootA, 'metadata', 'x-42-123.capture.json'), 'utf8'))
-    const jsonB = JSON.parse(readFileSync(path.join(rootB, 'metadata', 'x-42-123.capture.json'), 'utf8'))
+    const jsonA = JSON.parse(readFileSync(path.join(rootA, '.xmemeory', 'metadata', 'x-42-123.capture.json'), 'utf8'))
+    const jsonB = JSON.parse(readFileSync(path.join(rootB, '.xmemeory', 'metadata', 'x-42-123.capture.json'), 'utf8'))
     expect(jsonA.discoveredVia).toBeUndefined()
     expect(jsonB.discoveredVia).toBe('bookmarks')
     expect({ ...jsonB, discoveredVia: undefined, capturedAt: undefined }).toEqual({ ...jsonA, capturedAt: undefined })
@@ -331,7 +331,7 @@ it('后台标签页 10 秒未出现时关闭目标并报错', async () => {
 
 it('书签采集全程不置前页面：滚动与详情采集均无 bringToFront', async () => {
   const root = mkdtempSync(path.join(temporary, 'focus-'))
-  mkdirSync(path.join(root, 'local'), { recursive: true })
+  mkdirSync(path.join(root, '.xmemeory', 'local'), { recursive: true })
   const lib = new Library(root)
   const runSpy = vi.spyOn(BookmarkScanner.prototype, 'run')
   try {

@@ -14,7 +14,7 @@ const at = (hours: number) => new Date(new Date(2026, 9, 26, 10).getTime() + hou
 
 function fixture(id: string, options: { legacy?: boolean; text?: string } = {}) {
   const root = mkdtempSync(path.join(temporary, 'retries-'))
-  mkdirSync(path.join(root, 'metadata'), { recursive: true })
+  mkdirSync(path.join(root, '.xmemeory', 'metadata'), { recursive: true })
   const captured = captureFromPayload({
     rest_id: id,
     legacy: { full_text: options.text || '尚未取得完整内容', truncated: true, entities: { urls: [] } },
@@ -27,7 +27,7 @@ function fixture(id: string, options: { legacy?: boolean; text?: string } = {}) 
     source: `https://x.com/author/status/${id}`, partial: true
   }
   const meta = { ...captured.structured, sourceHash: options.legacy ? undefined : sourceHash(note.body) }
-  writeFileSync(path.join(root, 'metadata', `${note.id}.capture.json`), JSON.stringify(meta))
+  writeFileSync(path.join(root, '.xmemeory', 'metadata', `${note.id}.capture.json`), JSON.stringify(meta))
   return { root, note, meta }
 }
 
@@ -72,8 +72,8 @@ describe('不完整记忆补采预算与来源核验', () => {
     const all = [a.note]
     for (const id of ['104', '105', '106']) {
       const other = { ...a.note, id: `x-42-${id}`, source: `https://x.com/author/status/${id}` }
-      writeFileSync(path.join(a.root, 'metadata', `${other.id}.capture.json`),
-        readFileSync(path.join(a.root, 'metadata', `${a.note.id}.capture.json`)))
+      writeFileSync(path.join(a.root, '.xmemeory', 'metadata', `${other.id}.capture.json`),
+        readFileSync(path.join(a.root, '.xmemeory', 'metadata', `${a.note.id}.capture.json`)))
       all.push(other)
     }
     for (let index = 0; index < 3; index++) {

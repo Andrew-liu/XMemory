@@ -16,7 +16,7 @@ writeFileSync(path.join(sentinelDir, 'package.json'), JSON.stringify({ name: 'fo
 writeFileSync(path.join(sentinelDir, 'main.js'), `const path=require('node:path');
 const {app,BrowserWindow}=require('electron');
 app.setPath('userData',path.join(__dirname,'user-data'));
-app.whenReady().then(()=>{ const win=new BrowserWindow({width:420,height:180}); global.focusLosses=[]; global.sentinel=win; win.on('blur',()=>global.focusLosses.push(Date.now())); win.loadURL('data:text/html,<h1>后台采集焦点回归</h1><input autofocus placeholder="焦点监测窗口">'); });
+app.whenReady().then(()=>{ const win=new BrowserWindow({width:420,height:180}); global.focusLosses=[]; global.sentinel=win; win.on('blur',()=>global.focusLosses.push(Date.now())); win.loadURL('data:text/html;charset=utf-8,<h1>后台采集焦点回归（自动化测试窗口，请勿操作或关闭）</h1><input autofocus placeholder="焦点监测窗口">'); });
 app.on('window-all-closed',()=>app.quit());`)
 const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
 delete env.ELECTRON_RUN_AS_NODE

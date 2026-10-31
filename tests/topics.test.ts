@@ -28,7 +28,7 @@ it('选题以 Markdown 持久化，搜索、外部编辑、完成状态、删除
   expect(l.search({ kind: 'topic' })).toHaveLength(0)
   l.remove(n.id, true)
   expect(l.search({ kind: 'topic' })).toHaveLength(1)
-  const destination = path.join(l.root, 'local/export')
+  const destination = path.join(l.root, '.xmemeory/local/export')
   const exported = l.export(n.id, destination)
   expect(readFileSync(path.join(exported, n.path), 'utf8')).toContain('外部修改正文')
 })
@@ -45,8 +45,8 @@ it('未完成优先，组内创建日期倒序且编辑不重排，完成可以�
 it('选题与附件进入同步树，本地文件与凭据不进入同步', async () => {
   const l = library()
   const n = l.save({ kind: 'topic', title: '同步选题', body: '![图片](../assets/topic.png)', completed: true })
-  writeFileSync(path.join(l.root, 'assets/topic.png'), Buffer.from([1, 2, 3]))
-  for (const file of [n.path, 'assets/topic.png']) expect(syncAllowed(file)).toBe(true)
+  writeFileSync(path.join(l.root, 'attachments/topic.png'), Buffer.from([1, 2, 3]))
+  for (const file of [n.path, 'attachments/topic.png']) expect(syncAllowed(file)).toBe(true)
   for (const file of ['local/index.sqlite', 'local/secrets.json', 'topics/key.txt']) expect(syncAllowed(file)).toBe(false)
   const writes: Array<{ endpoint: string; body: any }> = []
   const sync = new GithubSync(l, () => {}, async (input, init) => {
@@ -65,7 +65,7 @@ it('选题与附件进入同步树，本地文件与凭据不进入同步', asyn
   await sync.run('example/synthetic', 'master', 'github_pat_synthetic')
   const paths = writes.find(w => w.endpoint === 'git/trees')!.body.tree.map((f: any) => f.path)
   expect(paths).toContain(n.path)
-  expect(paths).toContain('assets/topic.png')
+  expect(paths).toContain('attachments/topic.png')
   expect(paths.some((p: string) => p.startsWith('local/'))).toBe(false)
 })
 
