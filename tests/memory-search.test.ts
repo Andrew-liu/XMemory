@@ -60,7 +60,8 @@ describe('自动采集状态行', () => {
   })
   it('等待下一轮', () => {
     const view = autoStatus({ enabled: true, active: false, nextRunAt: '2026-10-23T14:32:00' }, bookmarks, archive, '', now)
-    expect(view.text).toBe('自动采集中 · 下次约 14:32 · 今日 12/200 · 历史已回溯完')
+    expect(view.text).toBe('自动采集中 · 下次约 14:32 · 今日 12/200 · 只采新书签')
+    expect(autoStatus({ enabled: true, active: false, backfill: true, nextRunAt: '2026-10-23T14:32:00' }, bookmarks, archive, '', now).text).toBe('自动采集中 · 下次约 14:32 · 今日 12/200 · 回溯历史中')
     expect(view.action).toBe('pause')
   })
   it('采集中带进度', () => {

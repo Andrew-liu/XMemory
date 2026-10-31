@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { BookmarkScanner, RiskGuard, type ScannerDeps } from '../src/main/x-bookmarks'
+import { BookmarkScanner, RiskGuard, rateLimitUntil, type ScannerDeps } from '../src/main/x-bookmarks'
 
 const temporary = path.resolve(process.cwd(), '../../trash/xmemeory-dev/tests')
 mkdirSync(temporary, { recursive: true })
@@ -27,6 +27,8 @@ function harness(overrides: Partial<ScannerDeps> = {}) {
     random: () => 0.5,
     stopped: () => stopped,
     progress: p => calls.progress.push(p),
+    // Most cases below describe backfill behaviour; new-only mode has its own cases at the end.
+    backfill: true,
     ...overrides
   }
   return {
@@ -56,7 +58,7 @@ it('跨日重置当日计数，当日额度用完拒绝启动', () => {
   g.rollover(new Date('2026-10-21T09:00:00'))
   expect(g.state).toMatchObject({ day: '2026-10-21', newToday: 0, articlesToday: 0 })
   const full = guardAt({ day: '2026-10-21', newToday: 200 })
-  expect(() => full.canStart(new Date('2026-10-21T09:00:00'))).toThrow('今日书签额度已用完（200 条）')
+  expect(() => full.canStart(new Date('2026-10-21T09:00:00'))).toThrow('今日书签额度已用完')
 })
 it('429 冷却在到期前阻止启动，到期后清除', () => {
   const now = new Date('2026-10-21T10:00:00')
@@ -127,7 +129,7 @@ it('连续 8 轮滚动无新 ID 且无新响应判定到底', async () => {
   const result = await scanner.run(20)
   expect(result.stopReason).toBe('bottom')
   expect(calls.scrolls).toBe(8)
-  expect(calls.sleeps.filter(ms => ms >= 1800 && ms <= 4500)).toHaveLength(8)
+  expect(calls.sleeps.filter(ms => ms >= 3000 && ms <= 7000)).toHaveLength(8)
   expect(JSON.parse(readFileSync(g.file, 'utf8')).historyComplete).toBe(true)
 })
 it('仍在移动的滚动不算空转，页面未到底部不判底', async () => {
@@ -138,7 +140,8 @@ it('仍在移动的滚动不算空转，页面未到底部不判底', async () =
     scanner.ingest(200, feed(tweet('1')))
     const result = await scanner.run(20)
     expect(result.stopReason).toBe('time')
-    expect(calls.scrolls).toBeGreaterThan(500)
+    // 30 minutes of 3–7 second scroll pauses.
+    expect(calls.scrolls).toBeGreaterThan(250)
     expect(g.state.historyComplete).toBe(false)
   }
 })
@@ -161,7 +164,7 @@ it('第 7 轮出现新响应时空转计数清零', async () => {
   expect(calls.scrolls).toBe(15)
   expect(calls.saved).toEqual(['1', '999'])
 })
-it('长文入队串行采集，第二条起随机等待 8–20 秒', async () => {
+it('长文入队串行采集，第二条起随机等待 20–40 秒', async () => {
   const g = guardAt()
   const { deps, calls } = harness()
   const scanner = new BookmarkScanner(g, deps)
@@ -173,7 +176,7 @@ it('长文入队串行采集，第二条起随机等待 8–20 秒', async () =>
   expect(calls.saved).toEqual(['203'])
   expect(result.articlesQueued).toBe(2)
   expect(g.state.articlesToday).toBe(2)
-  const articleSleeps = calls.sleeps.filter(ms => ms >= 8000 && ms <= 20000)
+  const articleSleeps = calls.sleeps.filter(ms => ms >= 20_000 && ms <= 40_000)
   expect(articleSleeps).toHaveLength(1)
 })
 it('作者未知的长文用 i/web 链接进入详情采集', async () => {
@@ -254,13 +257,13 @@ it('暂停在当前条目处理完后停止', async () => {
   const result = await scanner.run(20)
   expect(result).toMatchObject({ stopReason: 'paused', created: 1 })
 })
-it('每新增 30 条暂停 2–4 分钟，30 分钟运行时长停止', async () => {
+it('每新增 15 条暂停 3–6 分钟，30 分钟运行时长停止', async () => {
   const g = guardAt()
   const { deps, calls } = harness()
   const scanner = new BookmarkScanner(g, deps)
   scanner.ingest(200, feed(...Array.from({ length: 35 }, (_, i) => tweet(String(i + 1)))))
   const result = await scanner.run(50)
-  expect(calls.sleeps.some(ms => ms >= 120_000 && ms <= 240_000)).toBe(true)
+  expect(calls.sleeps.filter(ms => ms >= 180_000 && ms <= 360_000)).toHaveLength(2)
   expect(result.stopReason).toBe('bottom')
 
   const g2 = guardAt()
@@ -290,4 +293,80 @@ it('墓碑条目只计入已检查，每日长文额度触发停止', async () =
   const result2 = await scanner2.run(20)
   expect(result2.stopReason).toBe('daily-quota')
   expect(calls.details).toEqual([])
+})
+
+it('只采新书签：连续 5 条已存在即停止，即使历史未回溯完', async () => {
+  const g = guardAt({ historyComplete: false })
+  const known = new Set(['3', '4', '5', '6', '7', '8', '9'])
+  const { deps, calls } = harness({ backfill: false, isKnown: id => known.has(id) })
+  const scanner = new BookmarkScanner(g, deps)
+  scanner.ingest(200, feed(tweet('1'), tweet('2'), ...[...known].map(id => tweet(id)), tweet('100')))
+  const result = await scanner.run(20)
+  expect(result).toMatchObject({ stopReason: 'known-streak', created: 2, skipped: 5, checked: 7 })
+  expect(calls.saved).toEqual(['1', '2'])
+  expect(calls.scrolls).toBe(0)
+})
+it('只采新书签：新旧交错时检查满 30 条停止，不再往下滚', async () => {
+  const g = guardAt()
+  const ids = Array.from({ length: 80 }, (_, i) => String(i + 1))
+  const { deps, calls } = harness({ backfill: false, isKnown: id => Number(id) % 2 === 0 })
+  const scanner = new BookmarkScanner(g, deps)
+  scanner.ingest(200, feed(...ids.map(id => tweet(id))))
+  const result = await scanner.run(20)
+  expect(result).toMatchObject({ stopReason: 'check-limit', checked: 30, created: 15 })
+  expect(calls.scrolls).toBe(0)
+})
+it('只采新书签：新书签超过每轮上限时按 20 条停止', async () => {
+  const g = guardAt()
+  const { deps } = harness({ backfill: false })
+  const scanner = new BookmarkScanner(g, deps)
+  scanner.ingest(200, feed(...Array.from({ length: 40 }, (_, i) => tweet(String(i + 1)))))
+  expect((await scanner.run(20)).stopReason).toBe('limit')
+})
+it('回溯模式：历史未完成时连续已存在不停止（沿用旧规则）', async () => {
+  const g = guardAt({ historyComplete: false })
+  const { deps } = harness({ backfill: true, isKnown: id => id !== '50' })
+  const scanner = new BookmarkScanner(g, deps)
+  scanner.ingest(200, feed(...Array.from({ length: 50 }, (_, i) => tweet(String(i + 1)))))
+  const result = await scanner.run(30)
+  expect(result.created).toBe(1)
+  expect(result.stopReason).not.toBe('known-streak')
+})
+it('额度与节奏：每天 60 条、长文 15 篇；滚动 3～7 秒；长文间隔 20～40 秒', async () => {
+  const full = guardAt({ day: '2026-10-21', newToday: 60 })
+  expect(() => full.canStart(new Date('2026-10-21T09:00:00'))).toThrow('今日书签额度已用完（60 条）')
+  const g = guardAt()
+  const { deps, calls } = harness({ backfill: false })
+  const scanner = new BookmarkScanner(g, deps)
+  scanner.ingest(200, feed(articleTweet('1'), articleTweet('2')))
+  await scanner.run(20)
+  expect(calls.sleeps).toContain(30_000)
+  expect(calls.sleeps.filter(ms => ms >= 3000 && ms <= 7000).length).toBeGreaterThan(0)
+})
+it('429：第一次冷却 6 小时，同一天第二次冷却到次日 8:00', async () => {
+  const now = new Date('2026-10-21T10:00:00')
+  expect(rateLimitUntil(now, false).getTime()).toBe(now.getTime() + 6 * 3600_000)
+  expect(rateLimitUntil(now, true)).toEqual(new Date('2026-10-22T08:00:00'))
+  const g = guardAt()
+  const first = harness({ backfill: false })
+  first.setTime(now)
+  const a = new BookmarkScanner(g, first.deps)
+  a.ingest(429, undefined)
+  expect((await a.run(20)).stopReason).toBe('breaker:rate-limit')
+  expect(g.state.breaker?.until).toBe(new Date(now.getTime() + 6 * 3600_000).toISOString())
+  const later = new Date('2026-10-21T17:00:00')
+  g.canStart(later)
+  const second = harness({ backfill: false })
+  second.setTime(later)
+  const b = new BookmarkScanner(g, second.deps)
+  b.ingest(429, undefined)
+  await b.run(20)
+  expect(g.state.breaker?.until).toBe(new Date('2026-10-22T08:00:00').toISOString())
+  expect(() => g.canStart(new Date('2026-10-22T07:59:00'))).toThrow('限流冷却中')
+})
+it('旧状态文件（无 rateLimitedDay）可直接读取', () => {
+  const dir = root()
+  const g = new RiskGuard(dir, '42')
+  writeFileSync(g.file, JSON.stringify({ day: '2026-10-21', newToday: 3, articlesToday: 1, historyComplete: true }))
+  expect(new RiskGuard(dir, '42').state).toMatchObject({ newToday: 3, historyComplete: true, rateLimitedDay: undefined })
 })

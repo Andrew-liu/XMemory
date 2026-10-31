@@ -62,7 +62,7 @@ let settingsFile: string
 let secretsFile: string
 let secrets: Record<string,string> = {}
 let tick: ReturnType<typeof setInterval>
-const defaults: Settings = { theme: 'system', closeToTray: true, branch: 'main', autoCollect: false, memoryView: 'list' }
+const defaults: Settings = { theme: 'system', closeToTray: true, branch: 'main', autoCollect: false, backfillHistory: false, memoryView: 'list' }
 const loginItems: { available: boolean; get(): boolean; set(enabled: boolean): void } = process.env.XMEMEORY_TEST_DATA
   ? (() => { let enabled = false; return { available: process.env.XMEMEORY_TEST_AUTOSTART !== 'unavailable', get: () => enabled, set: (value: boolean) => { enabled = value } } })()
   : {
@@ -103,9 +103,13 @@ async function openLibrary(root: string) {
     now: () => Date.now(), random: () => Math.random(),
     setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: timer => clearTimeout(timer as ReturnType<typeof setTimeout>),
     summary: () => owner.bookmarksSummary(),
+    backfill: () => settings.backfillHistory === true,
     run: async limit => {
-      const result = await owner.collectBookmarks(limit, { silent: true })
-      if (settings.autoCollect && ['bottom', 'known-streak', 'limit', 'time'].includes(result.stopReason)) await owner.retryIncomplete()
+      const backfill = settings.backfillHistory === true
+      const result = await owner.collectBookmarks(limit, { silent: true, backfill })
+      // Backfill turns itself off once a round reaches the oldest bookmark.
+      if (backfill && result.stopReason === 'bottom') { settings = { ...settings, backfillHistory: false }; persist() }
+      if (settings.autoCollect && ['bottom', 'known-streak', 'check-limit', 'limit', 'time'].includes(result.stopReason)) await owner.retryIncomplete()
       return result
     },
     finish: async () => { await owner.release() },
@@ -115,7 +119,7 @@ async function openLibrary(root: string) {
   sync = new GithubSync(library, changed, githubNetworkFetch, () => rendererDirty)
 }
 const memoryViews = ['list', 'card'] as const
-const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), palette: z.enum(palettes).optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional(), memoryView: z.enum(memoryViews).optional() })
+const settingsSchema = z.object({ theme: z.enum(['system','light','dark']).optional(), palette: z.enum(palettes).optional(), closeToTray: z.boolean().optional(), repo: z.string().max(200).optional(), branch: z.string().max(150).optional(), memoryView: z.enum(memoryViews).optional(), backfillHistory: z.boolean().optional() })
 // Unattended rounds share one Chrome; turning off stops the round and closes Chrome right away.
 async function setAutoCollect(enabled: boolean) {
   settings = { ...settings, autoCollect: enabled }; persist()
@@ -250,6 +254,7 @@ app.whenReady().then(async () => {
   settings = { ...defaults, ...stored }
   if (settings.palette !== undefined && !(palettes as readonly string[]).includes(settings.palette)) delete settings.palette
   if (typeof settings.autoCollect !== 'boolean') settings.autoCollect = false
+  if (typeof settings.backfillHistory !== 'boolean') settings.backfillHistory = false
   if (!(memoryViews as readonly unknown[]).includes(settings.memoryView)) settings.memoryView = 'list'
   if (existsSync(secretsFile)) { try { secrets = JSON.parse(safeStorage.decryptString(readFileSync(secretsFile))) } catch { secrets = {} } }
   if (pruneSecrets(secrets)) { try { saveSecrets() } catch { /* Retry on the next launch. */ } }

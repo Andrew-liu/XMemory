@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.7.1-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
+[![version](https://img.shields.io/badge/version-0.7.2-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
 [![electron](https://img.shields.io/badge/Electron-44-b8412c?style=flat-square&labelColor=2e4a62&logo=electron&logoColor=white)](https://www.electronjs.org/) [![react](https://img.shields.io/badge/React-19-b8412c?style=flat-square&labelColor=2e4a62&logo=react&logoColor=white)](https://react.dev/) [![typescript](https://img.shields.io/badge/TypeScript-7-b8412c?style=flat-square&labelColor=2e4a62&logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![local-first](https://img.shields.io/badge/data-local--first-b8412c?style=flat-square&labelColor=2e4a62)](#数据与隐私) [![stars](https://img.shields.io/github/stars/Andrew-liu/XMemory?style=flat-square&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/stargazers)
 
 </div>
@@ -38,7 +38,7 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 ## 功能特性
 
 - 灵感日历：按周或按月查看，输入标题即可记录，一条灵感就是一条待办，可拖动排序或移到其他日期
-- X 书签自动采集：每小时增量采集，保留正文、原文链接、原图与长文结构，自带限额与熔断保护
+- X 书签自动采集：约每 3 小时增量采集，保留正文、原文链接、原图与长文结构，自带限额与熔断保护
 - 长文选题：在同一篇文档里写大纲和正文，写完勾选划线，未完成的始终在前
 - 所见即所得的 Markdown 编辑：富文本与源码一键切换，支持表格、链接、双向链接、笔记嵌入与一键清除格式
 - 全局搜索：覆盖灵感、记忆、选题和候选稿，命中关键词黄色高亮，点击结果直接定位到正文
@@ -86,10 +86,10 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 <details>
 <summary><b>记忆与 X 书签采集</b></summary>
 
-- 在设置中开启“在这台电脑上自动采集书签”后，每小时增量采集一次，已采集过的自动跳过；同一 X 账号只建议在一台电脑上开启。
+- 在设置中开启“在这台电脑上自动采集书签”后，约每 3 小时增量采集一次（夜间 1:00–8:00 不采集；连续 3 轮没有新书签时间隔逐步拉长到最多 12 小时），每轮只看最新的书签，连续 5 条已存在或查满 30 条就停；同一 X 账号只建议在一台电脑上开启。需要补采老书签时，打开“回溯历史书签”，补到底后会自动关闭。
 - 保存正文、原文链接和原图，不下载视频文件；长文保留标题、列表、引用、代码块、封面和原位配图，内嵌视频保留封面；短推的短链接还原为真实地址。
 - 记忆页顶部显示采集状态，一个按钮即可暂停或开启，与设置中的开关同步。
-- 采集自带限额与保护：每天最多新增 200 条（其中长文 50 篇），每轮最多 100 条（历史回溯完后 50 条）；遇到登录失效、限流、额度已满会跳过并说明原因，不弹窗。
+- 采集自带限额与保护：每天最多新增 60 条（其中长文 15 篇），每轮最多 20 条（回溯历史时 30 条）；遇到限流冷却 6 小时，同一天再次限流则停到次日 8:00；遇到登录失效、额度已满会跳过并说明原因，不弹窗。
 - 记忆按卡片上显示的时间从新到旧排列：有发布时间用发布时间，没有则用保存时间。
 - 右上角一个搜索框：搜正文或链接，`@作者` 按作者搜索，输入“不完整”筛出不完整记忆；列表与卡片视图可在设置中切换。
 - 图片保存失败时保留远程链接。不完整记忆可在详情页手动重新采集；开启自动采集后，还会在正常书签轮结束时尝试补采一条，每天最多 3 次、同条至少间隔 6 小时，连续 3 次未补全则等待人工处理。

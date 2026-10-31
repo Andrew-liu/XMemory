@@ -73,13 +73,13 @@ try {
 
   // T-05: enabling asks for confirmation; pause and the settings switch are the same state.
   const enable = page.locator('.auto-collect').getByRole('button', { name: '开启自动采集' })
-  page.once('dialog', dialog => { expect(dialog.message()).toContain('只在一台电脑上开启'); expect(dialog.message()).toContain('每天最多新增 200 条'); void dialog.dismiss() })
+  page.once('dialog', dialog => { expect(dialog.message()).toContain('只在一台电脑上开启'); expect(dialog.message()).toContain('每天最多新增 60 条'); expect(dialog.message()).toContain('夜间 1:00–8:00 不采集'); void dialog.dismiss() })
   await enable.click()
   await expect(status).toHaveText('自动采集未开启')
   page.once('dialog', dialog => void dialog.accept())
   await enable.click()
   await expect(status).toContainText('自动采集中 · 下次约')
-  await expect(status).toContainText('今日 0/200 · 历史回溯中')
+  await expect(status).toContainText('今日 0/60 · 只采新书签')
   expect(stored().autoCollect).toBe(true)
   const pause = page.locator('.auto-collect').getByRole('button', { name: '暂停' })
   await expect(pause).not.toHaveClass(/primary/)
@@ -100,7 +100,20 @@ try {
   const toggle = page.getByLabel('在这台电脑上自动采集书签')
   await expect(toggle).toBeChecked()
   await expect(page.getByText('同一个 X 账号只在一台电脑上开启，多台同时采集会增加风控风险，同步也更容易冲突。', { exact: true })).toBeVisible()
-  await expect(page.getByText('每小时采集新书签，每天最多 200 条', { exact: true })).toBeVisible()
+  await expect(page.getByText('约每 3 小时采集新书签，夜间不采，每天最多 60 条', { exact: true })).toBeVisible()
+  // v0.7.2: backfill is off by default; turning it on is saved and changes the status line.
+  const backfill = page.getByLabel('回溯历史书签')
+  // Click the visible switch, as a user does; the knob covers the transparent checkbox once it is on.
+  const backfillSwitch = page.locator('label.switch', { has: backfill })
+  await expect(backfill).not.toBeChecked()
+  await expect(page.getByText('关闭：每轮只看最新的书签，连续 5 条已存在或查满 30 条就停', { exact: true })).toBeVisible()
+  await backfillSwitch.click()
+  await expect(backfill).toBeChecked()
+  await expect(page.getByText('逐轮往下补采老书签，到底后自动关闭', { exact: true })).toBeVisible()
+  await expect.poll(() => stored().backfillHistory).toBe(true)
+  await expect.poll(() => page.evaluate(async () => (await window.xm.snapshot()).auto.backfill)).toBe(true)
+  await backfillSwitch.click()
+  await expect.poll(() => stored().backfillHistory).toBe(false)
   // v0.5.4: X section is a status row; low-frequency Chrome buttons live in the collapsed "高级".
   await expect(page.getByLabel('X 账号状态')).toHaveText('尚未确认登录')
   await expect(page.getByRole('button', { name: '登录 X', exact: true })).toBeVisible()

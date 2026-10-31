@@ -3,7 +3,7 @@ import type { ArchiveProgress, AutoCollectState, BookmarkGuardInfo, Note, Partia
 import { bookmarkStopText } from '../shared/bookmarks'
 
 export const PARTIAL_KEYWORD = '不完整'
-export const AUTO_CONFIRM = '同一个 X 账号只在一台电脑上开启。多台同时采集会让访问量翻倍，增加风控风险，同步时也更容易冲突。\n\n每小时采集一次，每天最多新增 200 条。\n\n确定在这台电脑上开启自动采集吗？'
+export const AUTO_CONFIRM = '同一个 X 账号只在一台电脑上开启。多台同时采集会让访问量翻倍，增加风控风险，同步时也更容易冲突。\n\n约每 3 小时采集一次新书签，夜间 1:00–8:00 不采集，每天最多新增 60 条。\n\n确定在这台电脑上开启自动采集吗？'
 export const AUTO_TIP = '同一个 X 账号只在一台电脑上开启，多台同时采集会增加风控风险，同步也更容易冲突。'
 
 export function isPartialMemory(note: Note) {
@@ -96,7 +96,7 @@ export function autoStatus(auto: AutoCollectState, bookmarks: BookmarkGuardInfo,
   if (skip?.reason === 'cooldown' && skip.until && Date.parse(skip.until) > now) return { text: `X 限流冷却中，${clock(skip.until)} 后自动恢复`, action: 'pause', detail }
   if (bookmarks.newToday >= bookmarks.dailyLimit) return { text: '今日额度已满，明天继续', action: 'pause', detail }
   const next = auto.nextRunAt ? ` · 下次约 ${clock(auto.nextRunAt)}` : ''
-  return { text: `自动采集中${next} · 今日 ${bookmarks.newToday}/${bookmarks.dailyLimit} · 历史${bookmarks.historyComplete ? '已回溯完' : '回溯中'}`, action: 'pause', detail }
+  return { text: `自动采集中${next} · 今日 ${bookmarks.newToday}/${bookmarks.dailyLimit} · ${auto.backfill ? '回溯历史中' : '只采新书签'}`, action: 'pause', detail }
 }
 
 export function AutoCollectBar({ view, toggle, login }: { view: AutoStatusView; toggle: () => void; login: () => void }) {

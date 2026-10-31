@@ -34,7 +34,7 @@ export interface BookmarkGuardInfo {
 export interface BookmarkRunResult { checked: number; created: number; skipped: number; failed: number; articlesQueued: number; stopReason: string }
 export type AutoSkipReason = 'login' | 'cooldown' | 'quota' | 'busy' | 'error'
 export interface AutoCollectState {
-  enabled: boolean; active: boolean; limit?: number; nextRunAt?: string
+  enabled: boolean; active: boolean; backfill?: boolean; limit?: number; nextRunAt?: string
   skip?: { reason: AutoSkipReason; at: string; until?: string; message?: string }
   lastRun?: { at: string; created: number; checked: number; stopReason: string }
 }
@@ -46,7 +46,7 @@ export interface Settings {
   closeToTray: boolean; repo?: string; branch: string; hasGithubKey?: boolean
   githubTokenType?: 'fine-grained' | 'classic' | 'invalid'; githubTokenSavedAt?: string
   legacyXCleanedAt?: string; openAtLogin?: boolean; openAtLoginAvailable?: boolean
-  autoCollect?: boolean; memoryView?: MemoryView
+  autoCollect?: boolean; backfillHistory?: boolean; memoryView?: MemoryView
 }
 export interface SearchQuery { query?: string; kind?: Kind; tag?: string; author?: string; from?: string; to?: string; deleted?: boolean; sort?: 'relevance' | 'date' }
 export interface SearchHit extends Note { snippet: string; score: number }

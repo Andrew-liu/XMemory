@@ -642,7 +642,7 @@ export class XCapture {
         this.set(completed ? '不完整记忆已补采完整' : review ? '记忆原文有变化，需要手动对照' : '补采后正文仍不完整，请稍后重试', { phase: completed ? 'complete' : 'partial' })
       } catch (error) {
         const message = error instanceof Error ? error.message : ''
-        if (/429|限流/.test(message)) guard.setBreaker('rate-limit', new Date(), new Date(Date.now() + 2 * 60 * 60_000))
+        if (/429|限流/.test(message)) guard.rateLimited(new Date())
         const reason = /登录|验证/.test(message) ? 'login' : /429|限流/.test(message) ? 'rate-limit' : /超时|网络/.test(message) ? 'network' : 'capture-error'
         this.partialRetries.finish(candidate.note.id, 'error', reason)
         this.set(`不完整记忆补采失败：${reason === 'login' ? '请重新登录 X' : reason === 'rate-limit' ? 'X 限流中' : '请稍后重试'}`, { phase: 'partial' })
@@ -653,7 +653,7 @@ export class XCapture {
     }
   }
 
-  async collectBookmarks(limit: number, options: { silent?: boolean } = {}): Promise<BookmarkRunResult> {
+  async collectBookmarks(limit: number, options: { silent?: boolean; backfill?: boolean } = {}): Promise<BookmarkRunResult> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('单轮上限需为 1～100 条')
     const silent = options.silent === true
     if (this.flowActive || this.running) throw new Error('登录或采集流程正在进行中')
@@ -673,6 +673,7 @@ export class XCapture {
       this.progress = { ...this.progress, mode: 'bookmarks', checked: 0, saved: 0, skipped: 0, failed: 0, queued: 0 }
       const detailPage = () => this.page && !this.page.isClosed() ? this.page : undefined
       const scanner = new BookmarkScanner(guard, {
+        backfill: options.backfill === true,
         isKnown: id => this.library.notes.has(`x-${account}-${id}`),
         saveDirect: async (tweet, id) => {
           const captured = captureFromPayload(tweet, id)

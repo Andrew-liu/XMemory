@@ -5,15 +5,21 @@ import { privatePath } from './layout'
 import { bookmarkEntries, captureFromPayload } from './x-parse'
 import type { BookmarkGuardInfo, BookmarkRunResult } from '../shared/types'
 
-export const DAILY_NEW = 200
-export const DAILY_ARTICLES = 50
+export const DAILY_NEW = 60
+export const DAILY_ARTICLES = 15
 export const RUN_MS = 30 * 60_000
-export const COOLDOWN_429_MS = 2 * 60 * 60_000
+export const COOLDOWN_429_MS = 6 * 60 * 60_000
+/** After a second rate limit on the same day, collection waits until this hour of the next day. */
+export const RATE_LIMIT_RESUME_HOUR = 8
+/** Backfill: once history is complete, this many already-saved bookmarks in a row end the round. */
 const KNOWN_STREAK_STOP = 20
+/** New-only mode: bookmarks are newest first, so a short run of saved ones means everything below is saved too. */
+export const NEW_ONLY_KNOWN_STOP = 5
+export const NEW_ONLY_CHECK_LIMIT = 30
 const IDLE_ROUNDS_BOTTOM = 8
 const ERROR_RESPONSES_BREAKER = 3
 const CONSECUTIVE_FAILURES_BREAKER = 3
-const BATCH_PAUSE_EVERY = 30
+const BATCH_PAUSE_EVERY = 15
 
 type Json = Record<string, any>
 export interface GuardState {
@@ -24,6 +30,13 @@ export interface GuardState {
   lastRunAt?: string
   lastStopReason?: string
   breaker?: { reason: string; at: string; until?: string }
+  /** Local day (YYYY-MM-DD) of the last rate limit; a second one that day stops collection until the next morning. */
+  rateLimitedDay?: string
+}
+export function rateLimitUntil(now: Date, again: boolean) {
+  if (!again) return new Date(now.getTime() + COOLDOWN_429_MS)
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, RATE_LIMIT_RESUME_HOUR)
+  return next
 }
 const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 function readGuardState(file: string): GuardState {
@@ -40,7 +53,8 @@ function readGuardState(file: string): GuardState {
         historyComplete: raw.historyComplete === true,
         lastRunAt: typeof raw.lastRunAt === 'string' ? raw.lastRunAt : undefined,
         lastStopReason: typeof raw.lastStopReason === 'string' ? raw.lastStopReason : undefined,
-        breaker
+        breaker,
+        rateLimitedDay: typeof raw.rateLimitedDay === 'string' ? raw.rateLimitedDay : undefined
       }
     }
   } catch { /* Missing or corrupt file falls back to defaults. */ }
@@ -73,6 +87,14 @@ export class RiskGuard {
   setBreaker(reason: string, now: Date, until?: Date) {
     this.state.breaker = { reason, at: now.toISOString(), until: until?.toISOString() }
     this.save()
+  }
+  /** X answered 429: cool down 6 hours, or until the next morning if it already happened today. */
+  rateLimited(now: Date) {
+    const today = dayKey(now)
+    const until = rateLimitUntil(now, this.state.rateLimitedDay === today)
+    this.state.rateLimitedDay = today
+    this.setBreaker('rate-limit', now, until)
+    return until
   }
   save() { atomic(this.file, JSON.stringify(this.state, null, 2)) }
 }
@@ -109,6 +131,8 @@ export interface ScannerDeps {
   now: () => Date
   random: () => number
   stopped: () => boolean
+  /** Walk on through saved bookmarks to fill in history; otherwise only the newest ones are checked. */
+  backfill?: boolean
   progress: (p: { checked: number; created: number; skipped: number; failed: number; queued: number }) => void
 }
 export class BookmarkScanner {
@@ -139,7 +163,7 @@ export class BookmarkScanner {
     if (this.pendingStop) return
     this.responses++
     if (status === 401 || status === 403) { this.breaker('auth'); return }
-    if (status === 429) { this.breaker('rate-limit', new Date(this.deps.now().getTime() + COOLDOWN_429_MS)); return }
+    if (status === 429) { if (!this.pendingStop) this.pendingStop = 'breaker:rate-limit'; this.guard.rateLimited(this.deps.now()); return }
     if (status !== 200 || payload === undefined) { this.errorResponse(); return }
     const parsed = bookmarkEntries(payload)
     if (!parsed.found) { this.breaker('schema'); return }
@@ -186,13 +210,14 @@ export class BookmarkScanner {
       if (this.pendingStop) return this.finish(this.pendingStop)
       if (this.deps.stopped()) return this.finish('paused')
       if (elapsed() >= RUN_MS) return this.finish('time')
+      if (!this.deps.backfill && this.checked >= NEW_ONLY_CHECK_LIMIT) return this.finish('check-limit')
       const tweet = this.queue.shift()
       if (!tweet) {
         if (this.bottomSeen) return this.finish('bottom')
         if (elapsed() >= RUN_MS) return this.finish('time')
         const seenBefore = this.seen.size, responsesBefore = this.responses
         const outcome = await this.deps.scroll()
-        await this.deps.sleep(1800 + this.deps.random() * 2700)
+        await this.deps.sleep(3000 + this.deps.random() * 4000)
         // Only a motionless scroll at the real page end with no new data counts toward bottom;
         // scrolling through already-loaded tall cards must not.
         const noData = this.seen.size === seenBefore && this.responses === responsesBefore
@@ -206,7 +231,8 @@ export class BookmarkScanner {
         this.skipped++
         this.knownStreak++
         this.report()
-        if (this.guard.state.historyComplete && this.knownStreak >= KNOWN_STREAK_STOP) return this.finish('known-streak')
+        if (!this.deps.backfill && this.knownStreak >= NEW_ONLY_KNOWN_STOP) return this.finish('known-streak')
+        if (this.deps.backfill && this.guard.state.historyComplete && this.knownStreak >= KNOWN_STREAK_STOP) return this.finish('known-streak')
         continue
       }
       this.knownStreak = 0
@@ -226,7 +252,7 @@ export class BookmarkScanner {
       } else {
         if (this.guard.state.articlesToday >= DAILY_ARTICLES) return this.finish('daily-quota')
         this.articlesQueued++
-        if (!firstArticle) await this.deps.sleep(8000 + this.deps.random() * 12_000)
+        if (!firstArticle) await this.deps.sleep(20_000 + this.deps.random() * 20_000)
         firstArticle = false
         try {
           const url = captured.post.author !== 'unknown' ? captured.post.url : `https://x.com/i/web/status/${id}`
@@ -246,7 +272,7 @@ export class BookmarkScanner {
       if (this.created >= limit) return this.finish('limit')
       if (this.guard.state.newToday >= DAILY_NEW) return this.finish('daily-quota')
       if (elapsed() >= RUN_MS) return this.finish('time')
-      if (sincePause >= BATCH_PAUSE_EVERY) { sincePause = 0; await this.deps.sleep(120_000 + this.deps.random() * 120_000) }
+      if (sincePause >= BATCH_PAUSE_EVERY) { sincePause = 0; await this.deps.sleep(180_000 + this.deps.random() * 180_000) }
     }
   }
 }
