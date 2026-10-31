@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.7.0-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
+[![version](https://img.shields.io/badge/version-0.7.1-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
 [![electron](https://img.shields.io/badge/Electron-44-b8412c?style=flat-square&labelColor=2e4a62&logo=electron&logoColor=white)](https://www.electronjs.org/) [![react](https://img.shields.io/badge/React-19-b8412c?style=flat-square&labelColor=2e4a62&logo=react&logoColor=white)](https://react.dev/) [![typescript](https://img.shields.io/badge/TypeScript-7-b8412c?style=flat-square&labelColor=2e4a62&logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![local-first](https://img.shields.io/badge/data-local--first-b8412c?style=flat-square&labelColor=2e4a62)](#数据与隐私) [![stars](https://img.shields.io/github/stars/Andrew-liu/XMemory?style=flat-square&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/stargazers)
 
 </div>
@@ -139,7 +139,7 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 - 冲突时保留双方，展示正文与附加字段差异，可选择版本、保留两份或手动合并；仅换行格式或 YAML 写法不同时不产生冲突。
 - 删除的内容进入回收站，支持恢复。
 - 资料库可直接用 Obsidian 打开：在 Obsidian 选择“打开本地仓库”，指向资料库文件夹即可。文件树里只有 `inspirations/`、`memories/`、`topics/`、`drafts/` 和图片目录 `attachments/`；记忆按 `memories/年份/日期 作者 - 标题.md` 命名，属性使用 `aliases`、`created`、`published` 等 Obsidian 字段，双链和图片两边都能显示。应用自己的数据（索引、同步状态、回收站、升级备份）都在隐藏目录 `.xmemeory/`。目前建议在 Obsidian 中只阅读，不在其中改动。
-- 从 0.6.x 升级时，首次启动会自动把旧资料库升级为新结构：先完整备份到 `.xmemeory/backup-<时间>/`，校验通过才算完成，失败会自动恢复原状。已同步的 GitHub 仓库由第一台升级的设备自动升级；其他设备也需要升级到 0.7.0 才能继续同步，旧版会提示版本不兼容并停止，不会改动远端。
+- 从 0.6.x 升级时，首次启动会自动把旧资料库升级为新结构：先完整备份到 `.xmemeory/backup-<时间>/`，校验通过才算完成，失败会自动恢复原状。已同步的 GitHub 仓库由第一台升级的设备自动升级；其他设备也需要升级到 0.7.x 才能继续同步，旧版会提示版本不兼容并停止，不会改动远端。
 
 </details>
 

@@ -325,12 +325,18 @@ app.on('before-quit', e => {
   closing = true
   void (async () => {
     await ensureSaved()
-    if (sync?.running) throw new Error('正在同步，请同步完成后退出')
+    if (sync?.running) {
+      // Stop at the next checkpoint; a sync stopped before its branch update leaves the remote untouched.
+      sync.cancel()
+      for (let waited = 0; sync.running && waited < 15_000; waited += 200) await new Promise(resolve => setTimeout(resolve, 200))
+      if (sync.running) throw new Error('同步正在等待 GitHub 响应，请稍后再退出')
+    }
     auto?.dispose(); capture?.pause(); clearInterval(tick)
     await capture?.shutdown()
     // The OS closes SQLite after exit. In-flight archive requests may still finish before exit.
     quitting = true; app.quit()
-  })().catch(e => dialog.showErrorBox('尚未退出', e.message)).finally(() => { closing = false })
+  // showMessageBox, not showErrorBox: the latter blocks the main thread, so even a system-initiated quit could not proceed.
+  })().catch(e => { void dialog.showMessageBox(win, { type: 'warning', title: '尚未退出', message: e instanceof Error ? e.message : '退出前的处理未完成', buttons: ['好'] }) }).finally(() => { closing = false })
 })
 // Clicking the Dock icon brings the window back after it was closed to the menu bar.
 app.on('activate', () => { if (win && !win.isDestroyed()) { win.show(); win.focus() } })

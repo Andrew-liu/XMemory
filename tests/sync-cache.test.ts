@@ -15,6 +15,7 @@ function setup() {
   const blobs = new Map<string, Buffer>()
   let gets = 0, writes = 0, failCommit = false, brokenDownload = false
   const trees = new Map<string, Map<string, Buffer>>()
+  let treeCount = 0, commitTree = ''
   const sync = new GithubSync(l, () => {}, async (input, init) => {
     const endpoint = String(input).split('/synthetic')[1]
     if (!endpoint) return Response.json({ private: true })
@@ -29,9 +30,14 @@ function setup() {
     writes++
     const body = JSON.parse(String(init?.body))
     if (endpoint === '/git/blobs') { const bytes = Buffer.from(body.content, 'base64'), sha = gitBlobHash(bytes); blobs.set(sha, bytes); return Response.json({ sha }) }
-    if (endpoint === '/git/trees') { const next = new Map(files); for (const e of body.tree) next.set(e.path, blobs.get(e.sha)!); trees.set('new-tree', next); return Response.json({ sha: 'new-tree' }) }
-    if (endpoint === '/git/commits') return Response.json({ sha: 'new-head' })
-    if (endpoint === '/git/refs/heads/master') { if (failCommit) return new Response('{}', { status: 409 }); files.clear(); for (const [p, b] of trees.get('new-tree')!) files.set(p, b); return Response.json({}) }
+    if (endpoint === '/git/trees') {
+      // Like GitHub: start from base_tree, then apply entries (sha, inline content, or null to delete).
+      const next = new Map(body.base_tree && body.base_tree !== 'tree' ? trees.get(body.base_tree)! : files)
+      for (const e of body.tree) { if (e.sha === null) next.delete(e.path); else next.set(e.path, typeof e.content === 'string' ? Buffer.from(e.content, 'utf8') : blobs.get(e.sha)!) }
+      const sha = `new-tree-${++treeCount}`; trees.set(sha, next); return Response.json({ sha })
+    }
+    if (endpoint === '/git/commits') { commitTree = body.tree; return Response.json({ sha: 'new-head' }) }
+    if (endpoint === '/git/refs/heads/master') { if (failCommit) return new Response('{}', { status: 409 }); const next = trees.get(commitTree)!; files.clear(); for (const [p, b] of next) files.set(p, b); return Response.json({}) }
     throw new Error('Unexpected write')
   })
   return { l, n, files, sync, run: () => sync.run('example/synthetic', 'master', 'github_pat_synthetic'), gets: () => gets, writes: () => writes, fail: (value: boolean) => { failCommit = value }, damage: () => { brokenDownload = true } }

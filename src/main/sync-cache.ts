@@ -11,6 +11,11 @@ const validSha = (sha: string) => /^[a-f0-9]{40}$/.test(sha)
 export class SyncCache {
   constructor(private root: string, private scope: string) {}
   private file(sha: string) { return safePath(this.root, `${PRIVATE}/local/sync-cache/${this.scope}/${sha}`) }
+  /** Cheap presence check (no hashing); read() still verifies content before use. */
+  has(sha: string) {
+    if (!validSha(sha)) return false
+    try { return existsSync(this.file(sha)) } catch { return false }
+  }
   read(sha: string): Buffer | undefined {
     if (!validSha(sha)) return
     try {

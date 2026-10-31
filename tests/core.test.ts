@@ -159,6 +159,8 @@ it('远端无更新时跳过远端目录读取，仅上传本地变化', async (
     if (url === syncRoot) return Response.json({ private: true })
     if (url.endsWith('git/ref/heads/master')) return Response.json({ object: { sha: 'head-1' } })
     if (init?.method === 'POST' && url.endsWith('git/blobs')) uploads.push(Buffer.from(JSON.parse(String(init.body)).content, 'base64').toString())
+    // Notes and metadata are sent inline in the tree request rather than as separate blobs.
+    if (init?.method === 'POST' && url.endsWith('git/trees')) for (const e of JSON.parse(String(init.body)).tree) if (typeof e.content === 'string') uploads.push(e.content)
     if (init?.method === 'POST') return Response.json({ sha: 'new-commit' })
     if (init?.method === 'PATCH') return Response.json({ object: { sha: 'head-1' } })
     return new Response('{}', { status: 404 })
@@ -185,6 +187,8 @@ it('远端有更新时先写入本地再上传，远端变化不重复回传', a
     if (url.endsWith('git/trees/tree-2?recursive=1')) return Response.json({ tree: [{ path: 'inspirations/remote-note.md', mode: '100644', type: 'blob', size: remoteContent.length, sha: 'remote-blob' }], truncated: false })
     if (url.endsWith('git/blobs/remote-blob')) return Response.json({ encoding: 'base64', content: remoteContent.toString('base64') })
     if (init?.method === 'POST' && url.endsWith('git/blobs')) uploads.push(Buffer.from(JSON.parse(String(init.body)).content, 'base64').toString())
+    // Notes and metadata are sent inline in the tree request rather than as separate blobs.
+    if (init?.method === 'POST' && url.endsWith('git/trees')) for (const e of JSON.parse(String(init.body)).tree) if (typeof e.content === 'string') uploads.push(e.content)
     if (init?.method === 'POST') return Response.json({ sha: 'new-commit' })
     if (init?.method === 'PATCH') return Response.json({ object: { sha: 'new-commit' } })
     return new Response('{}', { status: 404 })
