@@ -21,6 +21,10 @@
 - 空闲退避的计数只存在内存里，重启应用后从 3 小时重新开始。
 - 本机只有 Mac，Windows 未回归。Windows 安装包（`XMemeory Setup 0.7.2.exe`）是在 Mac 上交叉打的，exe 里已写入版本信息，但没有在 Windows 上运行过。
 
+Windows 本机免安装包补充验证（2026-11-01）：从当前未提交的 0.7.2 工作树重新构建 `release/XMemeory-0.7.2-portable-windows-20261101-011022/`，生成 `XMemeory-0.7.2-portable-win-x64.zip`（180601000 字节；SHA-256：`CF6260A915D3C4751EA794ECA1771F3E3B4AA367A5B216C7E065C27E9B9E5BA7`）。ZIP 内外 240 个文件的路径和大小一致，EXE 哈希一致；EXE 版本 `0.7.2.0`，未签名。类型检查、生产构建通过；Windows 全量单测 267/270 通过（Mac 路径断言在 Windows 上格式不同，另两项大仓库同步测试超过默认 5 秒）；自动采集、书签、补采和同步相关的 68 项单测在 60 秒超时配置下通过。以本机打包 EXE 启动的 desktop、themes、memory、calendar、clean-exit、topics、migration 七项合成桌面专项通过。免安装包仅保存在本机，未上传 GitHub；该验证不等于旧的跨平台安装包已完成 Windows 验收，也不包含真实 X 账号采集验证。
+
+GitHub Release v0.7.2（2026-11-02）：附件为 `XMemeory.Setup.0.7.2.exe`（NSIS 安装版，125296549 字节，SHA-256：`E83A77CC6CCE57D2955F9BC675890FD98075A01ADDC2C09165F24E85A7E83E76`）与 `XMemeory-0.7.2-win-x64.zip`（免安装版，175805941 字节，SHA-256：`F15DCF798E2861B28844C3D7831933D011826DC42B25AE18CFBEF06A2A116EBC`），均在 Windows 本机由与 `v0.7.2` 标签一致的代码构建，本地产物位于 `release/XMemeory-0.7.2-release-20261102/` 与 `release/XMemeory-0.7.2-portable-20261102/`。验证：类型检查、生产构建通过；安装版与免安装版的 `app.asar` 和 EXE 哈希一致，版本均为 0.7.2，未签名；ZIP 解压后 279 个文件与目录一致；以免安装版 EXE 运行 desktop、clean-exit 桌面专项通过。未验证：安装版的安装与卸载流程未在本机实际运行；本 Release 未附 Mac 安装包。
+
 ## v0.7.1 大仓库 GitHub 同步提速与可续传（2026-11-01）
 
 当前版本功能：
