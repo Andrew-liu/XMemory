@@ -214,7 +214,7 @@ export function migrateLibrary(root: string, now = new Date(), fault?: Fault): M
     if (fault === 'after-write') throw Object.assign(new Error('模拟中断'), { simulatedCrash: true })
     for (const file of input.keys()) if (file !== 'manifest.json' && !files.has(file)) rmSync(safePath(root, file), { force: true })
     for (const folder of [LEGACY_ASSETS, ...PRIVATE_FOLDERS, ...Object.values(folders)]) removeEmptyDirs(path.join(root, folder))
-    for (const folder of Object.values(folders)) mkdirSync(path.join(root, folder), { recursive: true })
+    for (const folder of ['inspirations', 'memories', 'drafts', 'topics']) mkdirSync(path.join(root, folder), { recursive: true })
     if (existsSync(path.join(root, 'local'))) {
       if (existsSync(privatePath(root, 'local'))) throw new Error('.xmemeory/local 已存在，未覆盖')
       renameSync(path.join(root, 'local'), privatePath(root, 'local'))

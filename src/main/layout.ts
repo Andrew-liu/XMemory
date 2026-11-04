@@ -48,6 +48,23 @@ export function memoryPath(input: { publishedAt?: string; createdAt?: string; au
   if ([...name].length > room) name = cut(name, room)
   return `memories/${date.getUTCFullYear()}/${name}${extra}.md`
 }
+/** `incomes/YYYY/YYYY-MM-DD 分类 - 标题.md`; `suffix` disambiguates two incomes that would get the same name. */
+export function incomePath(input: { scheduledDate?: string; createdAt?: string; incomeCategory?: string; title?: string }, suffix = '') {
+  const day = input.scheduledDate && /^\d{4}-\d{2}-\d{2}$/.test(input.scheduledDate)
+    ? input.scheduledDate
+    : (() => {
+        const d = memoryDate(undefined, input.createdAt)
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+      })()
+  const year = day.slice(0, 4)
+  const category = cut(safeName(input.incomeCategory || '') || '其他', 30)
+  const extra = suffix ? ` (${safeName(suffix)})` : ''
+  const title = cut(safeName((input.title || '').replace(/\s+/g, ' ')) || '未命名收入', 40)
+  let name = `${day} ${category} - ${title}`
+  const room = MAX_NAME - extra.length
+  if ([...name].length > room) name = cut(name, room)
+  return `incomes/${year}/${name}${extra}.md`
+}
 /** Suffix candidates for a name collision: tweet ID first, then the full note ID. */
 export function collisionSuffixes(id: string) {
   const tweet = id.match(/(\d+)$/)?.[1]

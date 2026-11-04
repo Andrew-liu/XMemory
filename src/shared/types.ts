@@ -1,5 +1,7 @@
 import type { Palette } from './themes'
-export type Kind = 'inspiration' | 'memory' | 'draft' | 'topic'
+export type Kind = 'inspiration' | 'memory' | 'draft' | 'topic' | 'income'
+export type IncomeStatus = 'confirmed' | 'completed' | 'received'
+export type IncomeCurrency = 'CNY' | 'USD'
 export type AgentMode = 'local' | 'web'
 export interface WebSource { title: string; url: string; source: string; accessedAt: string }
 export interface Note {
@@ -10,6 +12,7 @@ export interface Note {
   sources?: string[]; webSources?: WebSource[]; agentMode?: AgentMode; instruction?: string
   scheduledDate?: string; completed?: boolean; completedAt?: string
   partial?: boolean; capturedImages?: string[]
+  amount?: number; currency?: IncomeCurrency; incomeCategory?: string; incomeStatus?: IncomeStatus; receivedAt?: string
   generationProvider?: { id: string; name: string; model: string }
 }
 export interface ArchiveProgress {
@@ -47,6 +50,7 @@ export interface Settings {
   githubTokenType?: 'fine-grained' | 'classic' | 'invalid'; githubTokenSavedAt?: string
   legacyXCleanedAt?: string; openAtLogin?: boolean; openAtLoginAvailable?: boolean
   autoCollect?: boolean; backfillHistory?: boolean; memoryView?: MemoryView
+  usdToCnyRate?: number; incomeCategories?: string[]
 }
 export interface SearchQuery { query?: string; kind?: Kind; tag?: string; author?: string; from?: string; to?: string; deleted?: boolean; sort?: 'relevance' | 'date' }
 export interface SearchHit extends Note { snippet: string; score: number }

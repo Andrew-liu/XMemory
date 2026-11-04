@@ -1,6 +1,6 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Search, Lightbulb, Layers, Feather, Settings2, Plus, PanelLeft, ArrowUpRight, RefreshCw, Trash2, FolderOpen, Sun, Moon, Monitor, X, GitBranch, AlertCircle, Check } from 'lucide-react'
+import { Search, Lightbulb, Layers, Feather, Coins, Settings2, Plus, PanelLeft, ArrowUpRight, RefreshCw, Trash2, FolderOpen, Sun, Moon, Monitor, X, GitBranch, AlertCircle, Check } from 'lucide-react'
 import type { Note, Snapshot, Kind, SearchHit, Conflict } from '../shared/types'
 import { NoteEditor, type EditorHandle } from './Editor'
 
@@ -10,6 +10,8 @@ import './style.css'
 import { Topics } from './Topics'
 import { topicTemplate } from '../shared/topics'
 import { Calendar } from './Calendar'
+import { Income, type IncomeSubView } from './Income'
+import { DEFAULT_USD_RATE, normalizeUsdRate } from '../shared/income'
 import { AutoCollectBar, AUTO_CONFIRM, AUTO_TIP, MemorySearch, autoStatus, compareMemoryTime, isPartialMemory, memoryAuthorQuery, memoryHighlightQuery, memoryMatchesParsed, parseMemoryQuery, retryStatus } from './Memory'
 import { dateKey, noteDate } from '../shared/calendar'
 import { matchSnippet, splitDifference, splitMatches, stableOrder } from './highlight'
@@ -18,7 +20,7 @@ import { applyCachedTheme, applyTheme, watchSystemTheme } from './themes'
 
 const LIST_BATCH = 60
 type Page = Exclude<Kind, 'draft'> | 'search' | 'settings' | 'conflicts' | 'trash'
-const titles: Record<Page | Kind,string> = { inspiration: '灵感', memory: '记忆', draft: '候选稿', topic: '选题', search: '搜索', settings: '设置', conflicts: '冲突', trash: '回收站' }
+const titles: Record<Page | Kind,string> = { inspiration: '灵感', memory: '记忆', draft: '候选稿', topic: '选题', income: '生财', search: '搜索', settings: '设置', conflicts: '冲突', trash: '回收站' }
 function HighlightedText({ text, query }: { text: string; query: string }) {
   return <>{splitMatches(text, query).map((segment, index) => segment.highlighted ? <mark key={index}>{segment.text}</mark> : <React.Fragment key={index}>{segment.text}</React.Fragment>)}</>
 }
@@ -65,6 +67,8 @@ function App() {
 
   const [memoryQuery, setMemoryQuery] = useState('')
   const [recollecting, setRecollecting] = useState(false)
+  const [incomeView, setIncomeView] = useState<IncomeSubView>('ledger')
+  const [usdRateInput, setUsdRateInput] = useState(String(DEFAULT_USD_RATE))
   const editor = useRef<EditorHandle>(null)
   useEffect(() => window.xm.onBeforeClose(async recover => { if (recover) await editor.current?.recover(); else await editor.current?.flush() }), [])
   const searchInput = useRef<HTMLInputElement>(null)
@@ -79,6 +83,18 @@ function App() {
     const apply = () => { applyTheme(mode, palette) }
     apply(); return watchSystemTheme(apply)
   }, [state?.settings.theme, state?.settings.palette])
+  useEffect(() => {
+    if (state?.settings.usdToCnyRate !== undefined) {
+      setUsdRateInput(String(normalizeUsdRate(state.settings.usdToCnyRate)))
+    }
+  }, [state?.settings.usdToCnyRate])
+  async function saveUsdRate(raw: string) {
+    const rate = normalizeUsdRate(raw)
+    setUsdRateInput(String(rate))
+    if (state && state.settings.usdToCnyRate !== rate) {
+      await act(window.xm.settings({ usdToCnyRate: rate }))
+    }
+  }
   useEffect(() => { const key = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); void go('search').then(() => searchInput.current?.focus()) } }; addEventListener('keydown', key); return () => removeEventListener('keydown', key) }, [])
   useEffect(() => {
     let alive = true
@@ -169,7 +185,7 @@ function App() {
       <div className="brand"><span className="brand-mark" aria-hidden="true"/><strong>XMemeory</strong></div>
       <button className="sidebar-search" onClick={() => void go('search')}><Search size={15}/><span>搜索所有内容</span><kbd>⌘ K</kbd></button>
       <div className="nav-label">工作区</div>
-      <nav>{([['inspiration',Lightbulb],['memory',Layers],['topic',Feather]] as const).map(([id, Icon]) => <button key={id} className={page === id ? 'selected' : ''} onClick={() => void go(id)}><Icon size={16} strokeWidth={1.6}/><span>{titles[id]}</span><small>{state.notes.filter(n => n.kind === id && !n.deleted).length}</small></button>)}</nav>
+      <nav>{([['inspiration',Lightbulb],['memory',Layers],['topic',Feather],['income',Coins]] as const).map(([id, Icon]) => <button key={id} className={page === id ? 'selected' : ''} onClick={() => { if (id === 'income') setIncomeView('ledger'); void go(id) }}><Icon size={16} strokeWidth={1.6}/><span>{titles[id]}</span><small>{state.notes.filter(n => n.kind === id && !n.deleted).length}</small></button>)}</nav>
       <div className="sidebar-note"><p className="motto">捕捉一闪而过的想法<br/>让值得留下的内容<br/>成为下一次创作的起点</p></div>
       <div className="sidebar-bottom">
         {state.conflicts.length > 0 && <button onClick={() => void go('conflicts')}><GitBranch size={17}/><span>待处理冲突</span><small>{state.conflicts.length}</small></button>}
@@ -179,7 +195,25 @@ function App() {
       </div>
     </aside>
     <main className="workspace">
-      <header className="workspace-header"><PanelLeft size={17}/><span>{titles[page]}</span><div className="spacer"/>{page === 'memory' ? <MemorySearch query={memoryQuery} setQuery={setMemoryQuery} partialCount={partialCount}/> : <><span className="quiet">让想法有迹可循</span><button className="primary compact" onClick={() => page === 'topic' ? void createTopic('未命名选题') : void create()} disabled={topicBusy}><Plus size={16}/>{page === 'topic' ? '新选题' : '新灵感'}</button></>}</header>
+      <header className="workspace-header">
+        <PanelLeft size={17}/><span>{titles[page]}</span>
+        {page === 'income' && (
+          <div className="income-view-switcher" role="tablist" aria-label="生财视图切换">
+            <button type="button" role="tab" aria-selected={incomeView === 'ledger'} className={incomeView === 'ledger' ? 'active' : ''} onClick={() => setIncomeView('ledger')}>台账明细</button>
+            <button type="button" role="tab" aria-selected={incomeView === 'stats'} className={incomeView === 'stats' ? 'active' : ''} onClick={() => setIncomeView('stats')}>统计报表</button>
+            <button type="button" role="tab" aria-selected={incomeView === 'entry'} className={incomeView === 'entry' ? 'active' : ''} onClick={() => setIncomeView('entry')}>记一笔</button>
+          </div>
+        )}
+        <div className="spacer"/>
+        {page === 'memory' ? <MemorySearch query={memoryQuery} setQuery={setMemoryQuery} partialCount={partialCount}/> : page === 'income' ? <>
+          <label className="income-rate-box" title="用于将美元收入折合为人民币进行月度/年度汇总对比，原币种金额仍完整保留">
+            <span>汇率 1 USD =</span>
+            <input aria-label="美元参考汇率" type="number" step="0.01" min="0.01" max="1000" value={usdRateInput} onChange={e => setUsdRateInput(e.target.value)} onBlur={() => void saveUsdRate(usdRateInput)} onKeyDown={e => { if (e.key === 'Enter') void saveUsdRate(usdRateInput) }}/>
+            <span>CNY</span>
+          </label>
+          <button className="primary compact" onClick={() => setIncomeView('entry')}><Plus size={16}/>记一笔</button>
+        </> : <><span className="quiet">让想法有迹可循</span><button className="primary compact" onClick={() => page === 'topic' ? void createTopic('未命名选题') : void create()} disabled={topicBusy}><Plus size={16}/>{page === 'topic' ? '新选题' : '新灵感'}</button></>}
+      </header>
       {error && <div className="error-banner" role="alert"><AlertCircle size={16}/><span>{error}</span><button aria-label="关闭提示" title="关闭提示" onClick={() => setError('')}><X size={15}/></button></div>}
       {state.status && <div className="error-banner notice">{state.status}</div>}
       {page === 'settings' ? <div className="settings-page">
@@ -194,10 +228,10 @@ function App() {
           return connected ? <><div className="setting-row"><span className="status-dot ok"/><span className="setting-status" aria-label="同步状态">已连接 {state.settings.repo} · {state.settings.branch} · {state.syncStatus}</span><button disabled={connecting} onClick={() => void connectRepository('sync')}><RefreshCw size={15}/>立即同步</button></div><button className="disclosure" aria-expanded={repoOpen} onClick={() => repoOpen ? cancelEdit() : setRepoOpen(true)}>{repoOpen ? '收起' : '修改连接'}</button>{repoOpen && form}</> : <><p className="setting-detail flush">{state.syncStatus}</p>{form}</>
         })()}</section>
         <section className="settings-section about"><h2>关于</h2><div className="setting-row"><span className="setting-label">版本</span><span className="setting-status" aria-label="当前版本">v{state.version}</span></div><div className="setting-row"><span className="setting-label">源码</span><span className="setting-status"><button className="link-button" onClick={() => void window.xm.external('https://github.com/Andrew-liu/XMemory').catch(e => setError(e.message))}>github.com/Andrew-liu/XMemory ↗</button></span></div><p className="setting-detail">这是应用源码仓库，与上方配置的私有数据同步仓库不同。</p></section>
-        </div> : page === 'conflicts' ? <div className="conflicts-page"><h1>保留每一个版本</h1><p>先比较，再决定。未选中的版本仍有恢复记录。</p>{state.conflicts.map(c => <section className="conflict-card" key={c.id}><h2>{c.title}</h2><ConflictDetails conflict={c}/><div className="button-row"><button onClick={() => void act(window.xm.resolve(c.id,'current'))}>采用 A</button><button onClick={() => void act(window.xm.resolve(c.id,'incoming'))}>采用 B</button><button className="primary" onClick={() => void act(window.xm.resolve(c.id,'both'))}>两份都保留</button></div><details><summary>手动合并</summary><textarea id={`merge-${c.id}`} defaultValue={c.current.body}/><button onClick={() => void act(window.xm.resolve(c.id,'merge',(document.getElementById(`merge-${c.id}`) as HTMLTextAreaElement).value))}>保存合并内容</button></details></section>)}{!state.conflicts.length && <div className="empty"><Check size={38}/><h2>没有待处理的冲突</h2></div>}</div> : page === 'inspiration' && !selected ? <Calendar notes={state.notes} anchor={calendarDate} setAnchor={setCalendarDate} mode={calendarMode} setMode={setCalendarMode} open={id=>void open(id)} refresh={refresh} error={setError}/> : <div className="content-layout">
+        </div> : page === 'conflicts' ? <div className="conflicts-page"><h1>保留每一个版本</h1><p>先比较，再决定。未选中的版本仍有恢复记录。</p>{state.conflicts.map(c => <section className="conflict-card" key={c.id}><h2>{c.title}</h2><ConflictDetails conflict={c}/><div className="button-row"><button onClick={() => void act(window.xm.resolve(c.id,'current'))}>采用 A</button><button onClick={() => void act(window.xm.resolve(c.id,'incoming'))}>采用 B</button><button className="primary" onClick={() => void act(window.xm.resolve(c.id,'both'))}>两份都保留</button></div><details><summary>手动合并</summary><textarea id={`merge-${c.id}`} defaultValue={c.current.body}/><button onClick={() => void act(window.xm.resolve(c.id,'merge',(document.getElementById(`merge-${c.id}`) as HTMLTextAreaElement).value))}>保存合并内容</button></details></section>)}{!state.conflicts.length && <div className="empty"><Check size={38}/><h2>没有待处理的冲突</h2></div>}</div> : page === 'income' ? <Income notes={state.notes} settings={state.settings} subView={incomeView} setSubView={setIncomeView} refresh={refresh} error={setError}/> : page === 'inspiration' && !selected ? <Calendar notes={state.notes} anchor={calendarDate} setAnchor={setCalendarDate} mode={calendarMode} setMode={setCalendarMode} open={id=>void open(id)} refresh={refresh} error={setError}/> : <div className="content-layout">
         <section className={`item-list ${page === 'search' ? 'search-list' : ''}`}>
           <div className="list-heading"><div><span className="eyebrow">{page === 'search' ? '全部已保存内容' : page === 'memory' ? '从收藏到积累' : page === 'topic' ? '给长文一个起点' : '随时记录'}</span><h1>{titles[page]}<small>{page === 'search' ? hits.items.length : notes.length}</small></h1></div>{page === 'inspiration' && <button title="新建灵感" onClick={() => void create()}><Plus size={21}/></button>}</div>
-          {page === 'search' && <div className="search-controls"><div className="search-field"><Search size={17}/><input ref={searchInput} autoFocus placeholder="搜索灵感、记忆、选题和候选稿…" value={query} onChange={e => setQuery(e.target.value)}/></div><div className="filter-row"><select aria-label="内容类型" value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部类型</option><option value="inspiration">灵感</option><option value="memory">记忆</option><option value="draft">候选稿</option><option value="topic">选题</option></select><select value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="relevance">相关度</option><option value="date">最近修改</option></select></div><details><summary>更多筛选</summary><input placeholder="作者" value={author} onChange={e=>setAuthor(e.target.value)}/><input placeholder="标签" value={tag} onChange={e=>setTag(e.target.value)}/><input aria-label="起始日期" type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/><input aria-label="结束日期" type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}/></details></div>}
+          {page === 'search' && <div className="search-controls"><div className="search-field"><Search size={17}/><input ref={searchInput} autoFocus placeholder="搜索灵感、记忆、选题和候选稿…" value={query} onChange={e => setQuery(e.target.value)}/></div><div className="filter-row"><select aria-label="内容类型" value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部类型</option><option value="inspiration">灵感</option><option value="memory">记忆</option><option value="draft">候选稿</option><option value="topic">选题</option><option value="income">生财</option></select><select value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="relevance">相关度</option><option value="date">最近修改</option></select></div><details><summary>更多筛选</summary><input placeholder="作者" value={author} onChange={e=>setAuthor(e.target.value)}/><input placeholder="标签" value={tag} onChange={e=>setTag(e.target.value)}/><input aria-label="起始日期" type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/><input aria-label="结束日期" type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)}/></details></div>}
           {page === 'memory' && <AutoCollectBar view={autoStatus(state.auto, state.bookmarks, state.archive, state.xStatus)} toggle={() => setAutoCollect(!state.auto.enabled)} login={() => void go('settings')}/>}
           {page === 'topic' ? <Topics notes={notes} selected={selected} busy={topicBusy} create={createTopic} open={id => void open(id)} complete={id => void complete(id)}/> : <div className={`list-scroll ${page==='memory' && memoryView==='card' ? 'card-grid' : ''}`} onScroll={loadMore}>{visibleList.map(n => <button key={n.id} className={`note-card ${selected === n.id ? 'selected' : ''} ${page==='memory' && memoryView==='card' ? 'memory-tile' : ''}`} onClick={() => void open(n.id, markQuery)}><div className="card-top"><span>{n.author ? <>@<HighlightedText text={n.author} query={authorMark}/></> : titles[n.kind]}</span><time title={page==='memory'?'发布时间':'最近修改'}>{new Date(page === 'memory' ? n.publishedAt || n.createdAt : n.updatedAt).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'})}</time></div><h3 style={{textDecoration:n.completed?'line-through':undefined}}><HighlightedText text={n.title} query={markQuery}/>{n.completed && (n.kind === 'topic' ? ' · 已写完' : ' · 已使用')}</h3><p>{page === 'search' ? <HighlightedText text={(n as SearchHit).snippet} query={markQuery}/> : markQuery ? <HighlightedText text={matchSnippet(n.body.replace(/[#*\[\]]/g,''), markQuery)} query={markQuery}/> : n.body.replace(/[#*\[\]]/g,'').slice(0,140) || '写下第一个念头…'}</p><div className="card-bottom">{n.partial ? <span>正文不完整</span> : n.tags.length ? n.tags.map(t=><span key={t}>#{t}</span>) : /!\[[^\]]*]\([^)]+\)/.test(n.body) ? <span>含图片</span> : <span>Markdown</span>}{n.kind === 'draft' && <Feather size={12}/>}</div></button>)}{shownList.length > visibleList.length && <button className="link-button list-more" onClick={() => setShownCount(count => count + LIST_BATCH)}>显示更多（还有 {shownList.length - visibleList.length} 条）</button>}{!shownList.length && <div className="list-empty">{page === 'search' ? '没有找到匹配内容，试试其他关键词或清除筛选。' : page === 'memory' ? deferredMemoryQuery ? '没有匹配的记忆，试试其他关键词或清空搜索。' : state.auto.enabled ? '还没有记忆。自动采集会每小时把 X 书签保存到这里。' : '还没有记忆。开启自动采集后，X 书签会每小时保存到这里。' : '这里还没有内容。'}</div>}</div>}
           {page === 'memory' && note && isPartialMemory(note) && <p className="setting-detail" aria-label="不完整记忆补采状态">{retryStatus(state.partialRetries[note.id])}</p>}

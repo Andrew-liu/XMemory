@@ -4,11 +4,12 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { parseDocument, stringify } from 'yaml'
 import chokidar, { type FSWatcher } from 'chokidar'
-import type { Conflict, Kind, Note, SearchHit, SearchQuery } from '../shared/types'
+import type { Conflict, IncomeCurrency, IncomeStatus, Kind, Note, SearchHit, SearchQuery } from '../shared/types'
 import { validDate } from '../shared/calendar'
+import { isIncomeCurrency, isIncomeStatus, normalizeAmount } from '../shared/income'
 import { normalizeLines, stableValue } from '../shared/conflicts'
 import { referencedImages } from './export-images'
-import { ATTACHMENTS, PRIVATE, SCHEMA_VERSION, TRASH, collisionSuffixes, isTrashed, logicalPath, memoryPath, privatePath, resolveImage, trashPath } from './layout'
+import { ATTACHMENTS, PRIVATE, SCHEMA_VERSION, TRASH, collisionSuffixes, incomePath, isTrashed, logicalPath, memoryPath, privatePath, resolveImage, trashPath } from './layout'
 
 export const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 export function atomic(file: string, value: string | Buffer) {
@@ -98,7 +99,7 @@ export function ensureObsidianConfig(root: string) {
   if (existsSync(dir)) return
   atomic(path.join(dir, 'app.json'), JSON.stringify({ attachmentFolderPath: ATTACHMENTS, newLinkFormat: 'relative', useMarkdownLinks: true }, null, 2))
 }
-export const folders: Record<Kind, string> = { inspiration: 'inspirations', memory: 'memories', draft: 'drafts', topic: 'topics' }
+export const folders: Record<Kind, string> = { inspiration: 'inspirations', memory: 'memories', draft: 'drafts', topic: 'topics', income: 'incomes' }
 export class Library {
   notes = new Map<string, Note>()
   conflicts = new Map<string, Conflict>()
@@ -122,7 +123,7 @@ export class Library {
       if (manifest.schemaVersion === 1) throw new Error('资料库尚未升级到 Obsidian 兼容结构，请重新启动应用完成升级')
       if (manifest.schemaVersion !== SCHEMA_VERSION) throw new Error('资料库版本不兼容，已停止写入')
     }
-    for (const folder of [...Object.values(folders), ATTACHMENTS]) mkdirSync(path.join(root, folder), { recursive: true })
+    for (const folder of ['inspirations', 'memories', 'drafts', 'topics', ATTACHMENTS]) mkdirSync(path.join(root, folder), { recursive: true })
     for (const folder of ['metadata', 'tombstones', 'conflicts', 'local', 'trash']) mkdirSync(privatePath(root, folder), { recursive: true })
     if (!existsSync(manifestFile)) { atomic(manifestFile, JSON.stringify({ schemaVersion: SCHEMA_VERSION, application: 'XMemeory' })); ensureObsidianConfig(root) }
     const index = openIndex(root)
@@ -197,6 +198,17 @@ export class Library {
     note.scheduledDate = validDate(meta.scheduledDate) ? meta.scheduledDate : undefined
     note.completed = meta.completed === true
     note.completedAt = note.completed && typeof meta.completedAt === 'string' ? meta.completedAt : undefined
+    if (kind === 'income') {
+      const parsedAmount = meta.amount === undefined ? 0 : normalizeAmount(meta.amount)
+      if (parsedAmount === undefined) {
+        this.errors.push(`${file} 的金额无效，已按 0 显示`)
+        note.amount = 0
+      } else note.amount = parsedAmount
+      note.currency = isIncomeCurrency(meta.currency) ? meta.currency : 'CNY'
+      note.incomeCategory = typeof meta.incomeCategory === 'string' && meta.incomeCategory.trim() ? meta.incomeCategory.trim() : '其他'
+      note.incomeStatus = isIncomeStatus(meta.incomeStatus) ? meta.incomeStatus : 'confirmed'
+      note.receivedAt = note.incomeStatus === 'received' && typeof meta.receivedAt === 'string' ? meta.receivedAt : undefined
+    }
     if (meta.scheduledDate !== undefined && !validDate(meta.scheduledDate)) this.errors.push(`${file} 的日期无效，已按创建日期显示`)
     if (old && old.hash !== note.hash && kind === 'memory' && aux.savedHash !== note.hash) note.userEdited = true
     if (note.userEdited && !aux.userEdited) atomic(auxFile, JSON.stringify({ ...aux, userEdited: true }))
@@ -225,7 +237,7 @@ export class Library {
     try {
       this.db.exec('BEGIN IMMEDIATE'); began = true
       this.db.prepare('DELETE FROM search WHERE id = ?').run(n.id)
-      this.db.prepare('INSERT INTO search(id,text) VALUES (?,?)').run(n.id, [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction].join('\n'))
+      this.db.prepare('INSERT INTO search(id,text) VALUES (?,?)').run(n.id, [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction, n.incomeCategory].join('\n'))
       this.db.exec('COMMIT')
     } catch {
       if (began) { try { this.db.exec('ROLLBACK') } catch { /* Fall back to a full rebuild below. */ } }
@@ -304,7 +316,7 @@ export class Library {
       began = true
       this.db.exec('DELETE FROM search; DELETE FROM documents;')
       const stmt = this.db.prepare('INSERT INTO search(id,text) VALUES (?,?)')
-      for (const n of this.notes.values()) stmt.run(n.id, [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction].join('\n'))
+      for (const n of this.notes.values()) stmt.run(n.id, [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction, n.incomeCategory].join('\n'))
       this.db.exec('COMMIT')
       this.errors = this.errors.filter(message => !message.startsWith('本地索引：'))
     } catch (e) {
@@ -339,14 +351,26 @@ export class Library {
     for (const suffix of ['', ...collisionSuffixes(id)]) { const file = memoryPath(input, suffix); if (free(file)) return file }
     return memoryPath(input, randomUUID().slice(0, 8))
   }
+  /** Readable unused path for a new income record (`incomes/YYYY/YYYY-MM-DD 分类 - 标题.md`). */
+  private newIncomePath(input: { scheduledDate?: string; createdAt?: string; incomeCategory?: string; title?: string }, id: string) {
+    const used = new Set([...this.notes.values()].map(n => logicalPath(n.path).toLocaleLowerCase()))
+    const free = (file: string) => !used.has(file.toLocaleLowerCase()) && !existsSync(path.join(this.root, file)) && !existsSync(path.join(this.root, trashPath(file)))
+    for (const suffix of ['', id.slice(0, 8), id]) { const file = incomePath(input, suffix); if (free(file)) return file }
+    return incomePath(input, randomUUID().slice(0, 8))
+  }
   save(input: Partial<Note> & { kind: Kind; title: string; body: string }, expected?: string, options?: { quiet?: boolean }): Note {
     if (input.scheduledDate !== undefined && !validDate(input.scheduledDate)) throw new Error('无效日历日期')
+    if (input.amount !== undefined && normalizeAmount(input.amount) === undefined) throw new Error('无效收入金额')
     if (!(input.kind in folders) || input.body.length > 4_000_000 || input.title.length > 400) throw new Error('正文或标题超出限制')
     const id = input.id || randomUUID()
     if (!/^[\w-]{1,100}$/.test(id)) throw new Error('无效 ID')
     const old = this.notes.get(id)
     const now = new Date().toISOString()
-    const relative = old?.path || (input.kind === 'memory' ? this.newMemoryPath({ publishedAt: input.publishedAt, createdAt: now, author: input.author, title: input.title }, id) : `${folders[input.kind]}/${id}.md`)
+    const relative = old?.path || (input.kind === 'memory'
+      ? this.newMemoryPath({ publishedAt: input.publishedAt, createdAt: now, author: input.author, title: input.title }, id)
+      : input.kind === 'income'
+        ? this.newIncomePath({ scheduledDate: input.scheduledDate, createdAt: now, incomeCategory: input.incomeCategory, title: input.title }, id)
+        : `${folders[input.kind]}/${id}.md`)
     const target = safePath(this.root, relative)
     const before = existsSync(target) ? readFileSync(target, 'utf8') : ''
     if (old && expected !== hash(before)) {
@@ -362,21 +386,33 @@ export class Library {
     const publishedAt = input.publishedAt ?? old?.publishedAt ?? meta.published ?? legacyPublished
     const sortOrder = input.sortOrder ?? old?.sortOrder ?? meta.sortOrder
     const partial = input.partial ?? old?.partial ?? meta.partial
+    const isIncome = input.kind === 'income'
+    const amount = isIncome ? (normalizeAmount(input.amount ?? old?.amount ?? meta.amount ?? 0) ?? 0) : undefined
+    const rawCurrency = input.currency ?? old?.currency ?? meta.currency
+    const currency: IncomeCurrency | undefined = isIncome ? (isIncomeCurrency(rawCurrency) ? rawCurrency : 'CNY') : undefined
+    const rawCategory = input.incomeCategory ?? old?.incomeCategory ?? (typeof meta.incomeCategory === 'string' ? meta.incomeCategory : undefined)
+    const incomeCategory = isIncome ? (rawCategory?.trim() || '其他') : undefined
+    const rawStatus = input.incomeStatus ?? old?.incomeStatus ?? meta.incomeStatus
+    const incomeStatus: IncomeStatus | undefined = isIncome ? (isIncomeStatus(rawStatus) ? rawStatus : 'confirmed') : undefined
+    const receivedAt = isIncome && incomeStatus === 'received'
+      ? (input.receivedAt ?? old?.receivedAt ?? (typeof meta.receivedAt === 'string' ? meta.receivedAt : undefined) ?? now)
+      : undefined
     const created = old?.createdAt || (typeof meta.created === 'string' ? meta.created : typeof legacyCreated === 'string' ? legacyCreated : now)
     // Obsidian finds notes by alias, which makes UUID-named inspirations and topics reachable by title.
     const aliases = [...new Set([input.title, ...(Array.isArray(meta.aliases) ? meta.aliases.map(String).filter((alias: string) => alias !== old?.title) : [])])].filter(Boolean)
-    const raw = `---\n${stringify({ ...meta, xmemeory_id: id, type: input.kind, title: input.title, aliases: aliases.length ? aliases : undefined, tags: input.tags || old?.tags || [], created, scheduledDate: input.scheduledDate ?? old?.scheduledDate, sortOrder, completed, completedAt: completed ? old?.completedAt || now : undefined, author, source, published: publishedAt, partial: partial || undefined })}---\n${input.body}`
+    const raw = `---\n${stringify({ ...meta, xmemeory_id: id, type: input.kind, title: input.title, aliases: aliases.length ? aliases : undefined, tags: input.tags || old?.tags || [], created, scheduledDate: input.scheduledDate ?? old?.scheduledDate, sortOrder, completed, completedAt: completed ? old?.completedAt || now : undefined, author, source, published: publishedAt, partial: partial || undefined, ...(isIncome ? { amount, currency, incomeCategory, incomeStatus, receivedAt } : { receivedAt: undefined }) })}---\n${input.body}`
     const eol = before.includes('\r\n') ? '\r\n' : '\n'
     const persisted = (before.startsWith('\uFEFF') ? '\uFEFF' : '') + raw.replace(/\r?\n/g, eol)
     atomic(privatePath(this.root, 'local', 'pending.json'), JSON.stringify({ path: relative, before: hash(before), raw: persisted }))
     if (before) atomic(privatePath(this.root, 'local', `previous-${id}.md`), before)
     if (this.watcher) {
+      if (isIncome) this.watcher.add(path.join(this.root, folders.income))
       if (this.selfWrites.size > 500) this.selfWrites.clear()
       this.selfWrites.set(path.resolve(target), hash(persisted))
     }
     atomic(target, persisted)
     const defined = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
-    const { body: _body, hash: _hash, path: _path, ...aux } = { ...old, ...defined, id, author, source, partial }
+    const { body: _body, hash: _hash, path: _path, ...aux } = { ...old, ...defined, id, author, source, partial, ...(isIncome ? { amount, currency, incomeCategory, incomeStatus, receivedAt } : {}) }
     atomic(privatePath(this.root, 'metadata', `${id}.json`), JSON.stringify({ ...aux, savedHash: hash(persisted) }))
     atomic(privatePath(this.root, 'local', 'pending.json'), 'null')
     // Only this file changed: re-read it alone instead of rescanning every note and rebuilding the index.
@@ -438,7 +474,7 @@ export class Library {
     const hits: SearchHit[] = []
     for (const n of this.notes.values()) {
       if (!!n.deleted !== !!q.deleted || (q.kind && n.kind !== q.kind) || (q.tag && !n.tags.includes(q.tag)) || (q.author && !n.author?.includes(q.author)) || (q.from && n.updatedAt.slice(0, 10) < q.from) || (q.to && n.updatedAt.slice(0, 10) > q.to)) continue
-      const text = [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction].join('\n').normalize('NFKC').toLocaleLowerCase()
+      const text = [n.title, n.body, n.tags.join(' '), n.author, n.source, n.instruction, n.incomeCategory].join('\n').normalize('NFKC').toLocaleLowerCase()
       if (!terms.every(t => text.includes(t))) continue
       const score = terms.reduce((s, t) => s + (n.title.toLocaleLowerCase().includes(t) ? 4 : 1), 0)
       const pos = terms.length ? Math.max(0, n.body.toLocaleLowerCase().indexOf(terms[0])) : 0

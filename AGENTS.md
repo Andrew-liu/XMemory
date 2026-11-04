@@ -4,7 +4,7 @@
 
 - 本文件适用于 XMemeory 项目根目录及全部子目录；同时遵循上级工作区的 `AGENTS.md`。子目录存在更具体的规则时，操作前先读取。
 - 沟通、开发说明和交付总结默认使用简体中文；代码标识符遵循所选语言及项目惯例。
-- 当前工作区为 v0.7.0：Electron + React + TypeScript，Markdown 为权威正文（资料库兼容 Obsidian，schemaVersion 2，私有数据在 `.xmemeory/`），SQLite 为可重建本地索引；代码仓库为 Andrew-liu/XMemory，源码通过版本标签发布；Mac（Apple Silicon）已适配并验收，Windows 回归与签名公证仍待完成。
+- 当前工作区为 v0.8.0：Electron + React + TypeScript，Markdown 为权威正文（资料库兼容 Obsidian，schemaVersion 2，私有数据在 `.xmemeory/`），含灵感、记忆、选题与生财模块，SQLite 为可重建本地索引；代码仓库为 Andrew-liu/XMemory，源码通过版本标签发布；Mac（Apple Silicon）已适配并验收，Windows 回归与签名公证仍待完成。
 - 项目名称不等于产品需求。未确认前，不预设产品功能、技术栈、数据库、外部服务或部署方式。
 
 ## 开始开发前

@@ -35,7 +35,7 @@ export function normalizeRepository(value: string) {
 
 /** Files synced by layout v2. Trashed notes sync under the path they had before deletion (see GithubSync.physical). */
 export function syncAllowed(file: string) {
-  return file === 'manifest.json' || /^(inspirations|memories|drafts|topics)\/[\w\u0080-\uFFFF .()/+-]+\.md$/.test(file) || /^\.xmemeory\/(metadata|tombstones|conflicts)\/[\w-]+\.json$/.test(file) || /^\.xmemeory\/metadata\/[\w-]+\.capture\.json$/.test(file) || /^attachments\/[\w .()-]+\.(png|jpg|jpeg|webp|gif)$/i.test(file)
+  return file === 'manifest.json' || /^(inspirations|memories|drafts|topics|incomes)\/[\w\u0080-\uFFFF .()/+-]+\.md$/.test(file) || /^\.xmemeory\/(metadata|tombstones|conflicts)\/[\w-]+\.json$/.test(file) || /^\.xmemeory\/metadata\/[\w-]+\.capture\.json$/.test(file) || /^attachments\/[\w .()-]+\.(png|jpg|jpeg|webp|gif)$/i.test(file)
 }
 export function mergeChoice(base: string | undefined, local: string | undefined, remote: string | undefined): 'same' | 'local' | 'remote' | 'conflict' {
   if (local === remote) return 'same'

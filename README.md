@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![version](https://img.shields.io/badge/version-0.7.2-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
+[![version](https://img.shields.io/badge/version-0.8.0-b8412c?style=flat-square&labelColor=2e4a62)](ChangeLog.md) [![tag](https://img.shields.io/github/v/tag/Andrew-liu/XMemory?style=flat-square&label=latest%20tag&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/tags) [![license](https://img.shields.io/badge/license-MIT-b8412c?style=flat-square&labelColor=2e4a62)](LICENSE) [![platform](https://img.shields.io/badge/platform-Windows-b8412c?style=flat-square&labelColor=2e4a62)](#下载与安装)<br>
 [![electron](https://img.shields.io/badge/Electron-44-b8412c?style=flat-square&labelColor=2e4a62&logo=electron&logoColor=white)](https://www.electronjs.org/) [![react](https://img.shields.io/badge/React-19-b8412c?style=flat-square&labelColor=2e4a62&logo=react&logoColor=white)](https://react.dev/) [![typescript](https://img.shields.io/badge/TypeScript-7-b8412c?style=flat-square&labelColor=2e4a62&logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![local-first](https://img.shields.io/badge/data-local--first-b8412c?style=flat-square&labelColor=2e4a62)](#数据与隐私) [![stars](https://img.shields.io/github/stars/Andrew-liu/XMemory?style=flat-square&labelColor=2e4a62&color=b8412c)](https://github.com/Andrew-liu/XMemory/stargazers)
 
 </div>
@@ -40,19 +40,21 @@ XMemeory 用三个工作区串起这条链路：**灵感**按日记录、**记�
 - 灵感日历：按周或按月查看，输入标题即可记录，一条灵感就是一条待办，可拖动排序或移到其他日期
 - X 书签自动采集：约每 3 小时增量采集，保留正文、原文链接、原图与长文结构，自带限额与熔断保护
 - 长文选题：在同一篇文档里写大纲和正文，写完勾选划线，未完成的始终在前
+- 生财台账：记录每笔创作与副业收入（X工资、厂家商单、tutti商单、VPS分成、VPN分成及自定义分类），支持 CNY/USD 双币种、行内一键状态流转（已确定 / 已完成 / 已到账）与月度/年度统计报表
 - 所见即所得的 Markdown 编辑：富文本与源码一键切换，支持表格、链接、双向链接、笔记嵌入与一键清除格式
 - 全局搜索：覆盖灵感、记忆、选题和候选稿，命中关键词黄色高亮，点击结果直接定位到正文
 - GitHub 私有仓库双向同步：启动时与每 10 分钟自动同步，冲突时保留双方并支持手动合并
 - 和纸主题：亮、暗两版，正文与标题使用随应用打包的思源宋体，暗版专门校准文字对比度
 - 本地优先：正文为 Markdown，图片存在本地，删除先进回收站，Token 本机加密且不参与同步
 
-## 三个工作区
+## 四个工作区
 
 | 工作区 | 用来做什么                     | 核心能力                                                     |
 | ------ | ------------------------------ | ------------------------------------------------------------ |
 | 灵感   | 每天随手记下一闪而过的想法     | 周/月日历、快速创建、勾选已使用、拖拽排序与跨日移动          |
 | 记忆   | 把 X 书签沉淀成可检索的资料库  | 自动增量采集、长文与原图保存、不完整内容补采、按发布时间排序 |
 | 选题   | 把一个长文想法写成完整文章     | 待写/已写完分组、大纲与正文同文档、随时续写与撤销完成        |
+| 生财   | 记录每笔创作收入与月度/年度统计 | 双币种录入、已确定/已完成/已到账一键流转、月度与年度报表     |
 
 ## 产品演示
 
@@ -215,6 +217,7 @@ pnpm test:recovery     # 单实例与退出恢复
 pnpm test:clean-exit   # 无编辑退出
 pnpm test:migration    # 旧资料库自动升级为 Obsidian 兼容结构
 pnpm test:perf         # 2000 条记忆下搜索、编辑、读图的卡顿阈值
+pnpm test:income       # 生财模块双币种录入、状态流转与月度/年度统计
 ```
 
 `tests/` 下另有搜索定位、图片复制、同步缓存、冲突处理等专项，可用 `pnpm exec tsx tests/<文件名>.ts` 运行。设置环境变量 `XMEMEORY_TEST_EXE` 指向打包后的 `XMemeory.exe`，即可对安装包做同样的冒烟测试。Lint 尚未配置。
